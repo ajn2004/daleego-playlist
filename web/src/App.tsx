@@ -56,9 +56,13 @@ export default function App() {
   }
 
   return (
-    <div style={{ maxWidth: 1200, margin: '0 auto', padding: '1rem', fontFamily: 'system-ui, sans-serif' }}>
-      <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-        <h1 style={{ margin: 0 }}>Rotator</h1>
+    <div className="app-shell">
+      <header className="app-header">
+        <div>
+          <p className="eyebrow">LOCAL PLEX CONTROL</p>
+          <h1>Rotator</h1>
+        </div>
+        <p className="header-status"><span /> Local network</p>
       </header>
 
       {error && (
@@ -73,7 +77,7 @@ export default function App() {
         </div>
       )}
 
-      <div style={{ display: 'flex', gap: '1rem' }}>
+      <div className="app-layout">
         <PlaylistSidebar
           playlists={playlists}
           selectedId={selectedId}
@@ -97,7 +101,7 @@ export default function App() {
               onStatus={showStatus}
             />
           ) : (
-            <div style={{ color: '#666', padding: '2rem', textAlign: 'center' }}>
+            <div className="empty-state">
               Select or create a playlist to begin editing.
             </div>
           )}
@@ -142,26 +146,18 @@ function PlaylistSidebar({
   }
 
   return (
-    <div style={{ width: 260, minWidth: 260 }}>
-      <div style={{ marginBottom: '0.5rem', fontWeight: 'bold', color: '#555' }}>Playlists</div>
-      <div style={{ border: '1px solid #ddd', borderRadius: 4, overflow: 'hidden' }}>
+    <aside className="playlist-sidebar">
+      <div className="section-label">Playlists</div>
+      <div className="playlist-list">
         {playlists.map(p => (
           <div
             key={p.id}
             onClick={() => onSelect(p.id)}
-            style={{
-              padding: '0.5rem 0.75rem',
-              cursor: 'pointer',
-              borderBottom: '1px solid #eee',
-              background: selectedId === p.id ? '#e3f2fd' : 'white',
-              fontWeight: selectedId === p.id ? 600 : 400,
-            }}
+            className={`playlist-choice ${selectedId === p.id ? 'selected' : ''}`}
           >
             <div>{p.name}</div>
-            <div style={{ fontSize: '0.8rem', color: '#888' }}>
-              {p.queue_pending_count} pending
-              {' | '}
-              <span style={{ color: p.enabled ? '#080' : '#888' }}>
+              <div className="playlist-meta">
+                {p.queue_pending_count} queued <span className={p.enabled ? 'enabled' : ''}>
                 {p.enabled ? 'enabled' : 'disabled'}
               </span>
             </div>
@@ -170,7 +166,7 @@ function PlaylistSidebar({
       </div>
 
       {creating ? (
-        <div style={{ marginTop: '0.5rem', padding: '0.5rem', border: '1px solid #ddd', borderRadius: 4 }}>
+        <div className="create-playlist">
           <input
             type="text"
             placeholder="Playlist name"
@@ -195,7 +191,7 @@ function PlaylistSidebar({
           </div>
         </div>
       ) : (
-        <button onClick={() => setCreating(true)} style={{ ...btnStyle, width: '100%', marginTop: '0.5rem', background: '#0066cc', color: 'white', border: 'none' }}>
+        <button onClick={() => setCreating(true)} className="button primary sidebar-action">
           + Create Playlist
         </button>
       )}
@@ -211,12 +207,12 @@ function PlaylistSidebar({
               console.error(e)
             }
           }}
-          style={{ ...btnStyle, width: '100%', marginTop: '0.5rem', background: '#c00', color: 'white', border: 'none' }}
+          className="button danger sidebar-action"
         >
           Delete Playlist
         </button>
       )}
-    </div>
+    </aside>
   )
 }
 
@@ -510,13 +506,26 @@ function PlaylistEditor({
 
   const serverName = servers.find(s => s.id === playlist.media_server_id)?.name || playlist.media_server_id
 
-  if (!detail) return <div style={{ color: '#666', padding: '2rem', textAlign: 'center' }}>Loading...</div>
+  if (!detail) return <div className="empty-state">Loading playlist workspace...</div>
 
   return (
-    <div>
-      <h2 style={{ marginTop: 0 }}>{detail.name}</h2>
+    <div className="playlist-workspace">
+      <section className="playlist-overview">
+        <div>
+          <p className="eyebrow">PLAYLIST WORKSPACE</p>
+          <h2>{detail.name}</h2>
+          <p className="overview-meta">{detail.queue_pending_count} episodes ready <span>·</span> target {detail.queue_target_count} <span>·</span> {enabled ? 'live' : 'paused'}</p>
+        </div>
+        <div className="playlist-actions">
+          <button onClick={fill} disabled={filling} className="button primary">{filling ? 'Filling...' : 'Fill queue'}</button>
+          <button onClick={sync} disabled={syncing} className="button accent">{syncing ? 'Syncing...' : 'Sync Plex'}</button>
+          <button onClick={refill} disabled={refilling} className="button">{refilling ? 'Refilling...' : 'Rebuild'}</button>
+        </div>
+      </section>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem', marginBottom: '1rem' }}>
+      <details className="settings-panel">
+        <summary>Playlist settings and queue controls</summary>
+      <div className="settings-grid">
         <label>
           Name:
           <input type="text" value={name} onChange={e => setName(e.target.value)}
@@ -543,7 +552,7 @@ function PlaylistEditor({
         </div>
       </div>
 
-      <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem' }}>
+      <div className="settings-actions">
         <button onClick={save} disabled={saving} style={btnStyle}>{saving ? 'Saving...' : 'Save'}</button>
         <button onClick={fill} disabled={filling} style={{ ...btnStyle, background: '#0066cc', color: 'white', border: 'none' }}>
           {filling ? 'Filling...' : 'Fill'}
@@ -561,9 +570,12 @@ function PlaylistEditor({
           {syncing ? 'Syncing...' : 'Sync'}
         </button>
       </div>
+      </details>
 
-      <h3>Attached Series</h3>
-      <div style={{ border: '1px solid #ddd', borderRadius: 4, marginBottom: '1rem' }}>
+      <div className="workspace-columns">
+      <section className="series-panel panel">
+      <div className="panel-heading"><div><p className="eyebrow">WATCHLIST</p><h3>Series runway</h3></div><strong>{attachedSeries.length}</strong></div>
+      <div className="series-list">
         {attachedSeries.length === 0 && (
           <div style={{ padding: '1rem', color: '#888', textAlign: 'center' }}>
             No series attached. Use the search below to add series.
@@ -579,12 +591,13 @@ function PlaylistEditor({
           const progressPct = ps.total_episodes > 0
             ? watchedEpisodes / ps.total_episodes * 100
             : 0
+          const remainingPct = 100 - progressPct
           return (
             <React.Fragment key={s.id}>
-              <div style={{ display: 'flex', alignItems: 'center', padding: '0.5rem', borderBottom: isSetting ? 'none' : '1px solid #eee', gap: '0.5rem' }}>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 600 }}>{s.title}</div>
-                  <div style={{ fontSize: '0.85rem', color: '#666' }}>
+              <div className="series-card" style={{ '--progress': `${remainingPct}%`, '--runway-color': `hsl(${Math.max(0, Math.min(120, remainingPct * 1.2))} 63% 42%)` } as React.CSSProperties}>
+                <div className="series-details">
+                  <div className="series-title">{s.title}</div>
+                  <div className="series-next">
                     {ps.mode === 'serial' ? (
                       ps.next_episode_title ? (
                         <>Next: S{String(ps.next_season_number || 0).padStart(2, '0')}E{String(ps.next_episode_number || 0).padStart(2, '0')} - {ps.next_episode_title}</>
@@ -596,10 +609,10 @@ function PlaylistEditor({
                     ) : (
                       <span style={{ color: '#666' }}>Random episodes</span>
                     )}
-                    {' | '}
-                    <span>{watchedEpisodes}/{ps.total_episodes} ({progressPct.toFixed(1)}%)</span>
+                    <span className="series-progress-copy">{watchedEpisodes}/{ps.total_episodes} watched · {Math.max(ps.total_episodes - watchedEpisodes, 0)} left</span>
                   </div>
                 </div>
+                <div className="progress-stat"><strong>{progressPct.toFixed(0)}%</strong><span>complete</span></div>
                 {ps.mode === 'serial' && ps.total_episodes > 0 && (
                   <button
                     onClick={async () => {
@@ -630,7 +643,7 @@ function PlaylistEditor({
                 </select>
                 <button
                   onClick={() => toggleSeries(s.series_id, false)}
-                  style={{ ...smallBtn, color: '#c00', border: '1px solid #fcc' }}
+                  className="icon-button remove-button"
                   title="Remove from playlist"
                 >
                   Remove
@@ -683,7 +696,8 @@ function PlaylistEditor({
         })}
       </div>
 
-      <h3>Add Series</h3>
+      <div className="add-series">
+      <h3>Add series</h3>
       <input
         type="text"
         placeholder="Search series from this media server..."
@@ -709,8 +723,10 @@ function PlaylistEditor({
           )}
         </div>
       )}
+      </div>
 
-      <h3>Slot Cycle</h3>
+      <details className="slot-settings">
+      <summary>Rotation slots ({slots.length})</summary>
       <div style={{ marginBottom: '0.5rem' }}>
         {slots.map((slot, i) => (
           <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.3rem' }}>
@@ -730,9 +746,12 @@ function PlaylistEditor({
         <button onClick={addSlot} style={smallBtn}>+ Add Slot</button>
         <button onClick={saveSlots} style={{ ...smallBtn, marginLeft: '0.5rem' }}>Save Slots</button>
       </div>
+      </details>
+      </section>
 
-      <h3>Queue ({detail.queue_items?.length || 0} items)</h3>
-      <div style={{ maxHeight: 400, overflowY: 'auto', border: '1px solid #ddd', borderRadius: 4 }}>
+      <section className="queue-panel panel">
+      <div className="panel-heading"><div><p className="eyebrow">PLEX PLAYLIST</p><h3>Queue runway</h3></div><strong>{detail.queue_pending_count} ready</strong></div>
+      <div className="queue-table-wrap">
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.9rem' }}>
           <thead>
             <tr style={{ background: '#f5f5f5' }}>
@@ -780,10 +799,7 @@ function PlaylistEditor({
         </table>
       </div>
 
-      <h3>Actual Plex Playlist ({plexLoaded ? plexItems.length : 'not published'})</h3>
-      <p style={{ color: '#666', fontSize: '0.9rem' }}>
-        This is the current order reported by Plex. Saving replaces the Plex playlist exactly; Publish later restores the generated queue.
-      </p>
+      <div className="plex-panel-header"><h3>Plex order <span>{plexLoaded ? plexItems.length : 'not published'}</span></h3><p>Changes replace the local Plex playlist.</p></div>
       <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem' }}>
         <button onClick={loadPlexItems} disabled={plexLoading} style={smallBtn}>
           {plexLoading ? 'Refreshing...' : 'Refresh Plex'}
@@ -818,6 +834,8 @@ function PlaylistEditor({
           </div>
         </>
       )}
+      </section>
+      </div>
     </div>
   )
 }
