@@ -8,6 +8,7 @@ node_modules/
 dist/
 web/dist/
 web/src-tauri/target/
+web/src-tauri/gen/
 __pycache__/
 *.pyc
 .DS_Store

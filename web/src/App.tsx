@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { api } from './api/client'
+import { api, apiBaseURL } from './api/client'
 import type { Playlist, Series, PlaylistSeries, PlaylistSlot, PlaylistQueueItem, MediaServer, Episode, PlexPlaylistItem } from './types'
 
 export default function App() {
@@ -67,7 +67,7 @@ export default function App() {
 
       {error && (
         <div style={{ background: '#fee', color: '#c00', padding: '0.5rem', borderRadius: 4, marginBottom: '1rem' }}>
-          {error}
+          {error} <span style={{ fontSize: '0.85em' }}>API: {apiBaseURL}</span>
         </div>
       )}
 

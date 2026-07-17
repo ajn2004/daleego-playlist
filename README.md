@@ -54,6 +54,10 @@ Build installable Linux packages with:
 make gui-build
 ```
 
+On rolling-release distributions, the AppImage toolchain may not understand
+newer ELF sections in system libraries. `make gui-build` sets `NO_STRIP=1` to
+skip its optional, incompatible stripping step.
+
 The packages are written under `web/src-tauri/target/release/bundle/`. After
 installing the generated `.deb` package, Daleego is available in the desktop
 application launcher. For a Hyprland binding, point `exec` at the installed
@@ -65,7 +69,8 @@ bind = SUPER, P, exec, daleego
 
 By default the desktop application connects to `http://127.0.0.1:8090`. Set
 `VITE_ROTATOR_URL` before running `make gui-dev` or `make gui-build` to target
-another API address.
+another API address. Rebuild after changing this value because Vite embeds it
+in the desktop frontend.
 
 ## Plex Spike
 

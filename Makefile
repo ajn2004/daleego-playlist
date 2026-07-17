@@ -39,7 +39,7 @@ gui-dev:
 	cd web && npm run tauri dev
 
 gui-build:
-	cd web && npm run tauri build
+	cd web && NO_STRIP=1 npm run tauri build
 
 # Docker
 compose-up:

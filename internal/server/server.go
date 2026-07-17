@@ -138,7 +138,7 @@ func (s *Server) buildRouter() http.Handler {
 func tauriCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		if origin == "tauri://localhost" || origin == "http://tauri.localhost" {
+		if isAllowedDesktopOrigin(origin) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS")
@@ -152,6 +152,15 @@ func tauriCORS(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+func isAllowedDesktopOrigin(origin string) bool {
+	switch origin {
+	case "tauri://localhost", "http://tauri.localhost", "http://localhost:8091", "http://127.0.0.1:8091":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) Run(ctx context.Context) error {

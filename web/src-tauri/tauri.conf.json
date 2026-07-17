@@ -21,13 +21,14 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:8090 http://localhost:8090; style-src 'self' 'unsafe-inline';"
+      "csp": "default-src 'self'; connect-src 'self' http: https:; style-src 'self' 'unsafe-inline';"
     }
   },
   "bundle": {
     "active": true,
     "targets": ["deb", "appimage"],
     "category": "Utility",
+    "icon": ["icons/icon.png"],
     "shortDescription": "Local Plex TV playlist controller"
   }
 }

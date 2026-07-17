@@ -6,23 +6,32 @@ import (
 	"testing"
 )
 
-func TestTauriCORSAllowsTauriOrigins(t *testing.T) {
+func TestTauriCORSAllowsDesktopOrigins(t *testing.T) {
 	t.Parallel()
 
-	handler := tauriCORS(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	req := httptest.NewRequest(http.MethodOptions, "/api/v1/status", nil)
-	req.Header.Set("Origin", "tauri://localhost")
-	response := httptest.NewRecorder()
+	for _, origin := range []string{
+		"tauri://localhost",
+		"http://tauri.localhost",
+		"http://localhost:8091",
+		"http://127.0.0.1:8091",
+	} {
+		t.Run(origin, func(t *testing.T) {
+			handler := tauriCORS(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}))
+			req := httptest.NewRequest(http.MethodOptions, "/api/v1/status", nil)
+			req.Header.Set("Origin", origin)
+			response := httptest.NewRecorder()
 
-	handler.ServeHTTP(response, req)
+			handler.ServeHTTP(response, req)
 
-	if response.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want %d", response.Code, http.StatusNoContent)
-	}
-	if got := response.Header().Get("Access-Control-Allow-Origin"); got != "tauri://localhost" {
-		t.Fatalf("Access-Control-Allow-Origin = %q, want tauri origin", got)
+			if response.Code != http.StatusNoContent {
+				t.Fatalf("status = %d, want %d", response.Code, http.StatusNoContent)
+			}
+			if got := response.Header().Get("Access-Control-Allow-Origin"); got != origin {
+				t.Fatalf("Access-Control-Allow-Origin = %q, want %q", got, origin)
+			}
+		})
 	}
 }
 

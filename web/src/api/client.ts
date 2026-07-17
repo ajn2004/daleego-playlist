@@ -2,12 +2,20 @@ const isTauri = '__TAURI_INTERNALS__' in window
 const configuredBase = import.meta.env.VITE_ROTATOR_URL
 const BASE = (configuredBase || (isTauri ? 'http://127.0.0.1:8090' : '')).replace(/\/$/, '')
 
+export const apiBaseURL = BASE || window.location.origin
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
-    cache: 'no-store',
-    ...options,
-  })
+  let res: Response
+  try {
+    res = await fetch(`${BASE}${path}`, {
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      ...options,
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown connection error'
+    throw new Error(`Unable to reach the API at ${apiBaseURL}: ${message}`)
+  }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))
     throw new Error(body?.error?.message || `HTTP ${res.status}`)
