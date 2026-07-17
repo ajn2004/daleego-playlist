@@ -60,7 +60,7 @@ export default function App() {
       <header className="app-header">
         <div>
           <p className="eyebrow">LOCAL PLEX CONTROL</p>
-          <h1>Rotator</h1>
+          <h1>Daleego Playlists</h1>
         </div>
         <p className="header-status"><span /> Local network</p>
       </header>
@@ -385,10 +385,16 @@ function PlaylistEditor({
       mode: s.series_id === seriesId ? mode : s.mode,
     }))
     try {
-      await api.playlists.setSeries(playlist.id, updated)
-      await api.playlists.fill(playlist.id)
-      await loadDetail()
-      onUpdate()
+      const updatedPlaylist = await api.playlists.setSeries(playlist.id, updated)
+      console.log(updatedPlaylist)
+      setDetail(updatedPlaylist)
+      onStatus(mode === 'non_serial' ? 'Random episode order enabled' : 'Serial episode order enabled')
+      try {
+        await api.playlists.fill(playlist.id)
+        await loadDetail()
+      } catch (e: any) {
+        onStatus('Mode updated, but queue refill failed: ' + e.message)
+      }
     } catch (e: any) {
       onStatus('Mode update failed: ' + e.message)
     }
@@ -587,6 +593,10 @@ function PlaylistEditor({
           const ps = memberMap[s.series_id]
           const isSetting = settingNextFor === s.series_id
           const episodes = episodeCache[s.series_id] || []
+          const selectedQueueItem = (detail.queue_items || []).find(item =>
+            item.series_id === s.series_id &&
+            (item.status === 'pending' || item.status === 'pushed' || item.status === 'watching')
+          )
           const watchedEpisodes = ps.mode === 'serial' && ps.next_position != null
             ? Math.min(Math.max(ps.next_position - 1, 0), ps.total_episodes)
             : ps.watched_episodes
@@ -609,7 +619,11 @@ function PlaylistEditor({
                         <span style={{ color: '#c00' }}>No episodes imported</span>
                       )
                     ) : (
-                      <span style={{ color: '#666' }}>Random episode order</span>
+                      selectedQueueItem ? (
+                        <>Selected: S{String(selectedQueueItem.season_number || 0).padStart(2, '0')}E{String(selectedQueueItem.episode_number || 0).padStart(2, '0')} - {selectedQueueItem.episode_title}</>
+                      ) : (
+                        <span style={{ color: '#666' }}>Random episode order</span>
+                      )
                     )}
                     <span className="series-progress-copy">{watchedEpisodes}/{ps.total_episodes} watched · {Math.max(ps.total_episodes - watchedEpisodes, 0)} left</span>
                   </div>
@@ -637,7 +651,7 @@ function PlaylistEditor({
                 )}
                 <select
                   value={ps.mode}
-                  onChange={e => setSeriesMode(s.id, e.target.value as 'serial' | 'non_serial')}
+                  onChange={e => setSeriesMode(ps.series_id, e.target.value as 'serial' | 'non_serial')}
                   style={{ padding: '0.2rem', borderRadius: 4, border: '1px solid #ccc', fontSize: '0.85rem' }}
                 >
                   <option value="serial">Serial</option>

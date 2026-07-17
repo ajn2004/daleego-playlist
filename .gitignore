@@ -1,5 +1,5 @@
 .env
-.envrc
+.envrcq
 .env.local
 *.exe
 *.test
@@ -10,3 +10,4 @@ web/dist/
 __pycache__/
 *.pyc
 .DS_Store
+scripts/
