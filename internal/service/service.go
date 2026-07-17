@@ -1201,49 +1201,55 @@ func (s *Service) FillPlaylist(ctx context.Context, playlistID string) (int, err
 			queuedEpisodes[item.EpisodeID] = true
 		}
 	}
-
-	usedSeriesInCycle := make(map[string]bool)
-	lastCycleIndex := -1
+	membersByID := make(map[string]repository.PlaylistSeries, len(members))
+	for _, member := range members {
+		membersByID[member.ID] = member
+	}
 
 	inserted := 0
-	actualSlot := 0
-	for i := 0; i < need; i++ {
-		globalSlotPos := playlist.CycleCursor + actualSlot
+	consumedSlots := 0
+	lastCycleIndex := -1
+	var candidates []fillCandidate
+	for attempts := 0; inserted < need && attempts < need*len(slots); attempts++ {
+		globalSlotPos := playlist.CycleCursor + consumedSlots
 		cycleIndex := globalSlotPos / len(slots)
 		slotPosition := globalSlotPos % len(slots)
 		slot := slots[slotPosition]
 
+		newCycle := false
 		if cycleIndex != lastCycleIndex {
-			usedSeriesInCycle = make(map[string]bool)
+			newCycle = true
 			lastCycleIndex = cycleIndex
-		}
+			candidates = nil
+			for _, m := range members {
+				episodeID, rating, err := s.getPlaylistEpisode(ctx, m, playlistID, queuedEpisodes)
+				if err != nil || episodeID == "" {
+					continue
+				}
 
-		var candidates []fillCandidate
-		for _, m := range members {
-			if usedSeriesInCycle[m.SeriesID] {
-				continue
+				candidates = append(candidates, fillCandidate{
+					seriesID:  m.SeriesID,
+					psID:      m.ID,
+					mode:      m.Mode,
+					episodeID: episodeID,
+					rating:    rating,
+				})
 			}
-
-			episodeID, rating, err := s.getPlaylistEpisode(ctx, m, playlistID, queuedEpisodes)
-			if err != nil || episodeID == "" {
-				continue
-			}
-
-			candidates = append(candidates, fillCandidate{
-				seriesID:  m.SeriesID,
-				psID:      m.ID,
-				mode:      m.Mode,
-				episodeID: episodeID,
-				rating:    rating,
-			})
 		}
 
 		if len(candidates) == 0 {
+			if newCycle {
+				break
+			}
+			consumedSlots++
 			continue
 		}
 
-		selected := selectFillCandidate(candidates, slot.SlotType, globalSlotPos)
-		usedSeriesInCycle[selected.seriesID] = true
+		selected, ok := selectFillCandidate(candidates, slot.SlotType, globalSlotPos)
+		consumedSlots++
+		if !ok {
+			continue
+		}
 
 		pos := maxPos + inserted + 1
 		score := selected.rating
@@ -1268,12 +1274,23 @@ func (s *Service) FillPlaylist(ctx context.Context, playlistID string) (int, err
 		}
 
 		queuedEpisodes[selected.episodeID] = true
+		for i, candidate := range candidates {
+			if candidate.seriesID == selected.seriesID {
+				episodeID, rating, err := s.getPlaylistEpisode(ctx, membersByID[candidate.psID], playlistID, queuedEpisodes)
+				if err != nil || episodeID == "" {
+					candidates = append(candidates[:i], candidates[i+1:]...)
+					break
+				}
+				candidates[i].episodeID = episodeID
+				candidates[i].rating = rating
+				break
+			}
+		}
 		inserted++
-		actualSlot++
 	}
 
-	if inserted > 0 {
-		if err := s.playlistRepo.IncrementCursor(ctx, playlistID, inserted); err != nil {
+	if consumedSlots > 0 {
+		if err := s.playlistRepo.IncrementCursor(ctx, playlistID, consumedSlots); err != nil {
 			return 0, err
 		}
 	}
@@ -1293,17 +1310,18 @@ func (s *Service) getPlaylistEpisode(ctx context.Context, member repository.Play
 		if progress.NextEpisodeID == nil {
 			return "", 0, nil
 		}
-		if queued[*progress.NextEpisodeID] {
-			return "", 0, nil
-		}
-		ep, err := s.episodeRepo.GetByID(ctx, *progress.NextEpisodeID)
+		episodes, err := s.episodeRepo.ListBySeries(ctx, member.SeriesID)
 		if err != nil {
 			return "", 0, nil
 		}
-		return ep.ID, ep.Rating, nil
+
+		if ep, ok := firstUnqueuedEpisodeAtCursor(episodes, *progress.NextEpisodeID, progress.NextPosition, queued); ok {
+			return ep.ID, ep.Rating, nil
+		}
+		return "", 0, nil
 	}
 
-	// Non-serial: find a random unplayed, unqueued episode
+	// Non-serial: find a random unplayed, unqueued episode.
 	episodes, err := s.episodeRepo.ListBySeries(ctx, member.SeriesID)
 	if err != nil {
 		return "", 0, nil
@@ -1339,6 +1357,26 @@ func (s *Service) getPlaylistEpisode(ctx context.Context, member repository.Play
 	}
 	selected := eligible[n.Int64()]
 	return selected.ID, selected.Rating, nil
+}
+
+func firstUnqueuedEpisodeAtCursor(episodes []repository.Episode, nextEpisodeID string, nextPosition *int, queued map[string]bool) (repository.Episode, bool) {
+	atCursor := nextPosition != nil
+	for _, ep := range episodes {
+		if !atCursor {
+			if ep.ID != nextEpisodeID {
+				continue
+			}
+			atCursor = true
+		}
+		if nextPosition != nil && ep.AbsoluteOrder < *nextPosition {
+			continue
+		}
+		if queued[ep.ID] {
+			continue
+		}
+		return ep, true
+	}
+	return repository.Episode{}, false
 }
 
 func (s *Service) initPlaylistCursor(ctx context.Context, member repository.PlaylistSeries) (string, float64, error) {
@@ -1469,36 +1507,55 @@ func (s *Service) SetPlaylistNextEpisode(ctx context.Context, playlistID, series
 	return nil
 }
 
-func selectFillCandidate(candidates []fillCandidate, slotType string, position int) fillCandidate {
+func selectFillCandidate(candidates []fillCandidate, slotType string, position int) (fillCandidate, bool) {
 	if len(candidates) == 0 {
-		return fillCandidate{}
+		return fillCandidate{}, false
 	}
 
-	sort.SliceStable(candidates, func(i, j int) bool {
-		return candidates[i].seriesID < candidates[j].seriesID
+	pool := append([]fillCandidate(nil), candidates...)
+	sort.Slice(pool, func(i, j int) bool {
+		return pool[i].seriesID < pool[j].seriesID
 	})
 
 	switch slotType {
 	case "top_rated":
-		sort.SliceStable(candidates, func(i, j int) bool {
-			if candidates[i].rating != candidates[j].rating {
-				return candidates[i].rating > candidates[j].rating
+		pool = ratedFillCandidates(pool)
+		if len(pool) == 0 {
+			return fillCandidate{}, false
+		}
+		sort.Slice(pool, func(i, j int) bool {
+			if pool[i].rating != pool[j].rating {
+				return pool[i].rating > pool[j].rating
 			}
-			return candidates[i].seriesID < candidates[j].seriesID
+			return pool[i].seriesID < pool[j].seriesID
 		})
-		return candidates[0]
+		return pool[0], true
 	case "lowest_rated":
-		sort.SliceStable(candidates, func(i, j int) bool {
-			if candidates[i].rating != candidates[j].rating {
-				return candidates[i].rating < candidates[j].rating
+		pool = ratedFillCandidates(pool)
+		if len(pool) == 0 {
+			return fillCandidate{}, false
+		}
+		sort.Slice(pool, func(i, j int) bool {
+			if pool[i].rating != pool[j].rating {
+				return pool[i].rating < pool[j].rating
 			}
-			return candidates[i].seriesID < candidates[j].seriesID
+			return pool[i].seriesID < pool[j].seriesID
 		})
-		return candidates[0]
+		return pool[0], true
 	default:
-		idx := position % len(candidates)
-		return candidates[idx]
+		idx := position % len(pool)
+		return pool[idx], true
 	}
+}
+
+func ratedFillCandidates(candidates []fillCandidate) []fillCandidate {
+	rated := make([]fillCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.rating > 0 {
+			rated = append(rated, candidate)
+		}
+	}
+	return rated
 }
 
 func (s *Service) PublishPlaylist(ctx context.Context, playlistID string) error {

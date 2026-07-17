@@ -386,7 +386,9 @@ function PlaylistEditor({
     }))
     try {
       await api.playlists.setSeries(playlist.id, updated)
+      await api.playlists.fill(playlist.id)
       await loadDetail()
+      onUpdate()
     } catch (e: any) {
       onStatus('Mode update failed: ' + e.message)
     }
@@ -607,7 +609,7 @@ function PlaylistEditor({
                         <span style={{ color: '#c00' }}>No episodes imported</span>
                       )
                     ) : (
-                      <span style={{ color: '#666' }}>Random episodes</span>
+                      <span style={{ color: '#666' }}>Random episode order</span>
                     )}
                     <span className="series-progress-copy">{watchedEpisodes}/{ps.total_episodes} watched · {Math.max(ps.total_episodes - watchedEpisodes, 0)} left</span>
                   </div>

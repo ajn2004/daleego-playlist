@@ -251,6 +251,13 @@ func (r *PlaylistRepo) SetPlaylistSeries(ctx context.Context, playlistID string,
 				if _, err := tx.Exec(ctx, `UPDATE playlist_series SET mode = $1 WHERE id = $2`, ns.Mode, existing.ID); err != nil {
 					return fmt.Errorf("update mode: %w", err)
 				}
+				// Queue entries were selected using the old eligibility mode.
+				// Preserve an actively watched item, but replace the rest on the next fill.
+				if _, err := tx.Exec(ctx,
+					`UPDATE playlist_queue_items SET status = 'skipped'
+					 WHERE playlist_id = $1 AND series_id = $2 AND status IN ('pending', 'pushed')`, playlistID, ns.SeriesID); err != nil {
+					return fmt.Errorf("skip queue entries for mode change: %w", err)
+				}
 			}
 		} else {
 			if _, err := tx.Exec(ctx,

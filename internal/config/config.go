@@ -22,7 +22,7 @@ func Load() (*Config, error) {
 	if dbURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL is required")
 	}
-	httpAddr := envDefault("HTTP_ADDR", ":8090")
+	httpAddr := envDefault("HTTP_ADDR", ":8091")
 	plexURL := os.Getenv("PLEX_URL")
 	plexToken := os.Getenv("PLEX_TOKEN")
 	plexPlaylistName := envDefault("PLEX_PLAYLIST_NAME", "TV Rotation")
