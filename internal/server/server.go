@@ -85,6 +85,7 @@ func (s *Server) buildRouter() http.Handler {
 	r.Use(chimw.Logger)
 	r.Use(chimw.Recoverer)
 	r.Use(chimw.Timeout(30 * time.Second))
+	r.Use(tauriCORS)
 
 	r.Get("/healthz", s.handleHealthz)
 	r.Get("/readyz", s.handleReady)
@@ -132,6 +133,25 @@ func (s *Server) buildRouter() http.Handler {
 	})
 
 	return r
+}
+
+func tauriCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if origin == "tauri://localhost" || origin == "http://tauri.localhost" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		}
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) Run(ctx context.Context) error {

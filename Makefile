@@ -1,4 +1,4 @@
-.PHONY: dev test test-integration lint fmt generate migrate-up migrate-down web-dev compose-up compose-down
+.PHONY: dev test test-integration lint fmt generate migrate-up migrate-down web-dev gui-dev gui-build compose-up compose-down
 
 # Go commands
 GO ?= go
@@ -35,6 +35,12 @@ migrate-down:
 web-dev:
 	cd web && npm run dev
 
+gui-dev:
+	cd web && npm run tauri dev
+
+gui-build:
+	cd web && npm run tauri build
+
 # Docker
 compose-up:
 	docker compose up -d
@@ -60,6 +66,8 @@ help:
 	@echo "  make fmt             Format Go code"
 	@echo "  make migrate-up      Run database migrations"
 	@echo "  make web-dev         Run frontend dev server"
+	@echo "  make gui-dev         Run the Tauri Linux desktop app"
+	@echo "  make gui-build       Build Linux desktop packages"
 	@echo "  make compose-up      Start all services"
 	@echo "  make compose-down    Stop all services"
 	@echo "  make spike           Run Plex connectivity spike"

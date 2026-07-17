@@ -32,6 +32,41 @@ migrations before using new features.
 make dev
 ```
 
+## Linux Desktop GUI
+
+The Tauri desktop application is a lightweight Wayland-native window that uses
+the same local HTTP API as the web client. Start the API first, then launch it
+in development mode:
+
+```bash
+make gui-dev
+```
+
+Building Tauri on Linux requires the WebKitGTK development libraries. On
+Debian or Ubuntu, install `libwebkit2gtk-4.1-dev`, `build-essential`,
+`libssl-dev`, `libayatana-appindicator3-dev`, and `librsvg2-dev`. On Arch,
+install the equivalent `webkit2gtk-4.1`, `base-devel`, `openssl`,
+`libappindicator-gtk3`, and `librsvg` packages.
+
+Build installable Linux packages with:
+
+```bash
+make gui-build
+```
+
+The packages are written under `web/src-tauri/target/release/bundle/`. After
+installing the generated `.deb` package, Daleego is available in the desktop
+application launcher. For a Hyprland binding, point `exec` at the installed
+`daleego` executable:
+
+```text
+bind = SUPER, P, exec, daleego
+```
+
+By default the desktop application connects to `http://127.0.0.1:8090`. Set
+`VITE_ROTATOR_URL` before running `make gui-dev` or `make gui-build` to target
+another API address.
+
 ## Plex Spike
 
 Test basic Plex connectivity:
