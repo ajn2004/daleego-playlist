@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+base_url="${ROTATOR_URL:-http://localhost:8090/api/v1}"
+
+case "${1:-}" in
+  status)
+    curl --fail --silent "${base_url}/status" | jq
+    ;;
+  current)
+    curl --fail --silent "${base_url}/rotations/current" | jq
+    ;;
+  generate)
+    curl --fail --silent --request POST --header "Content-Type: application/json" --data '{}' "${base_url}/rotations/generate" | jq
+    ;;
+  publish)
+    rotation_id="${2:?rotation id required}"
+    curl --fail --silent --request POST "${base_url}/rotations/${rotation_id}/publish" | jq
+    ;;
+  sync)
+    curl --fail --silent --request POST "${base_url}/rotations/current/sync" | jq
+    ;;
+  series)
+    curl --fail --silent "${base_url}/series" | jq
+    ;;
+  activate)
+    series_id="${2:?series id required}"
+    curl --fail --silent --request PATCH --header "Content-Type: application/json" --data '{"active": true}' "${base_url}/series/${series_id}" | jq
+    ;;
+  *)
+    echo "usage: rotator {status|current|generate|publish ID|sync|series|activate ID}" >&2
+    exit 2
+    ;;
+esac

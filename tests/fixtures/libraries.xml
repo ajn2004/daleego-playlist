@@ -1,0 +1,4 @@
+<MediaContainer size="1">
+  <Directory key="/library/sections/1" title="TV Shows" type="show" />
+  <Directory key="/library/sections/2" title="Movies" type="movie" />
+</MediaContainer>

@@ -1,0 +1,56 @@
+package main
+
+import (
+	"context"
+	"log/slog"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"github.com/andrew/rotator/internal/config"
+	"github.com/andrew/rotator/internal/server"
+)
+
+func main() {
+	cfg, err := config.Load()
+	if err != nil {
+		slog.Error("failed to load config", "error", err)
+		os.Exit(1)
+	}
+
+	logLevel := new(slog.LevelVar)
+	switch cfg.LogLevel {
+	case "debug":
+		logLevel.Set(slog.LevelDebug)
+	case "warn":
+		logLevel.Set(slog.LevelWarn)
+	case "error":
+		logLevel.Set(slog.LevelError)
+	default:
+		logLevel.Set(slog.LevelInfo)
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel})))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+
+	srv, err := server.New(ctx, cfg)
+	if err != nil {
+		slog.Error("failed to create server", "error", err)
+		os.Exit(1)
+	}
+
+	go func() {
+		<-sig
+		slog.Info("shutting down")
+		cancel()
+	}()
+
+	if err := srv.Run(ctx); err != nil {
+		slog.Error("server error", "error", err)
+		os.Exit(1)
+	}
+}

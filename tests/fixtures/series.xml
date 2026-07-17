@@ -1,0 +1,4 @@
+<MediaContainer size="2">
+  <Directory ratingKey="10" key="/library/metadata/10" title="The Expanse" type="show" guid="plex://show/5d776b2f9f0a9a001f0a0a0a" />
+  <Directory ratingKey="11" key="/library/metadata/11" title="Babylon 5" type="show" guid="plex://show/5d776b2f9f0a9a001f0a0a0b" />
+</MediaContainer>

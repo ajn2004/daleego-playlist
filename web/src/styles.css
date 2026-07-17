@@ -1,0 +1,36 @@
+:root {
+  color-scheme: dark;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  background: #10131a;
+  color: #e8edf5;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-width: 320px;
+  background: #10131a;
+  color: #e8edf5;
+}
+
+button, input, select {
+  font: inherit;
+  color: #e8edf5 !important;
+  background: #202733 !important;
+  border-color: #465266 !important;
+}
+
+button:not(:disabled) { cursor: pointer; }
+button:hover:not(:disabled) { filter: brightness(1.18); }
+button:disabled { cursor: not-allowed; opacity: 0.55; }
+
+#root div[style*="background"] { background: #171d27 !important; }
+#root tr[style*="background"] { background: #202733 !important; }
+#root div[style*="border"], #root table, #root td, #root th { border-color: #364152 !important; }
+#root div[style*="color: '#666'"], #root div[style*="color: '#888'"], #root p { color: #aeb9ca !important; }
+
+@media (max-width: 760px) {
+  #root > div > div:last-child { flex-direction: column; }
+  #root > div > div:last-child > div:first-child { width: 100% !important; min-width: 0 !important; }
+}

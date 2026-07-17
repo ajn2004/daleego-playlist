@@ -1,0 +1,7 @@
+<MediaContainer size="1">
+  <Video ratingKey="100" key="/library/metadata/100" parentRatingKey="10" guid="plex://episode/5d776b2f9f0a9a001f0a0a0c" type="episode" title="Dulcinea" index="1" parentIndex="1" year="2015" duration="2700000" rating="8.2" viewCount="1" librarySectionID="1" librarySectionTitle="TV Shows">
+    <Media id="1000" duration="2700000" bitrate="4000" audioChannels="6" audioCodec="aac" videoCodec="h264" videoResolution="1080" container="mp4">
+      <Part id="10000" key="/library/parts/10000" duration="2700000" file="/tv/The Expanse/S01E01.mp4" size="1350000000" />
+    </Media>
+  </Video>
+</MediaContainer>

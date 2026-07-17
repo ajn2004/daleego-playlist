@@ -1,0 +1,17 @@
+<MediaContainer size="3">
+  <Video ratingKey="100" key="/library/metadata/100" parentRatingKey="10" guid="plex://episode/5d776b2f9f0a9a001f0a0a0c" type="episode" title="Dulcinea" titleSort="Dulcinea" summary="A discovery on Saturn's moon" index="1" parentIndex="1" year="2015" duration="2700000" rating="8.2" viewCount="1" librarySectionID="1" librarySectionTitle="TV Shows">
+    <Media id="1000" duration="2700000" bitrate="4000" audioChannels="6" audioCodec="aac" videoCodec="h264" videoResolution="1080" container="mp4">
+      <Part id="10000" key="/library/parts/10000" duration="2700000" file="/tv/The Expanse/S01E01.mp4" size="1350000000" />
+    </Media>
+  </Video>
+  <Video ratingKey="101" key="/library/metadata/101" parentRatingKey="10" guid="plex://episode/5d776b2f9f0a9a001f0a0a0d" type="episode" title="The Big Empty" index="2" parentIndex="1" year="2015" duration="2600000" audienceRating="8.1" librarySectionID="1" librarySectionTitle="TV Shows">
+    <Media id="1001" duration="2600000" bitrate="4000" audioChannels="6" audioCodec="aac" videoCodec="h264" videoResolution="1080" container="mp4">
+      <Part id="10001" key="/library/parts/10001" duration="2600000" file="/tv/The Expanse/S01E02.mp4" size="1300000000" />
+    </Media>
+  </Video>
+  <Video ratingKey="102" key="/library/metadata/102" parentRatingKey="10" guid="plex://episode/5d776b2f9f0a9a001f0a0a0e" type="episode" title="Remember the Cant" index="3" parentIndex="1" year="2015" duration="2650000" rating="8.5" librarySectionID="1" librarySectionTitle="TV Shows">
+    <Media id="1002" duration="2650000" bitrate="4000" audioChannels="6" audioCodec="aac" videoCodec="h264" videoResolution="1080" container="mp4">
+      <Part id="10002" key="/library/parts/10002" duration="2650000" file="/tv/The Expanse/S01E03.mp4" size="1325000000" />
+    </Media>
+  </Video>
+</MediaContainer>
