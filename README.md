@@ -127,4 +127,3 @@ apt install lua-socket lua-cjson
 brew install lua-socket lua-cjson
 ```
 
-hello there
