@@ -142,7 +142,16 @@ func tauriCORS(next http.Handler) http.Handler {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+			if requestedHeaders := r.Header.Get("Access-Control-Request-Headers"); requestedHeaders != "" {
+				w.Header().Set("Access-Control-Allow-Headers", requestedHeaders)
+			} else {
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+			}
+			if r.Header.Get("Access-Control-Request-Private-Network") == "true" {
+				w.Header().Set("Access-Control-Allow-Private-Network", "true")
+			}
+		} else if r.Method == http.MethodOptions && origin != "" {
+			slog.Warn("rejected CORS preflight", "origin", origin)
 		}
 
 		if r.Method == http.MethodOptions {
@@ -156,7 +165,7 @@ func tauriCORS(next http.Handler) http.Handler {
 
 func isAllowedDesktopOrigin(origin string) bool {
 	switch origin {
-	case "tauri://localhost", "http://tauri.localhost", "http://localhost:8091", "http://127.0.0.1:8091":
+	case "tauri://localhost", "http://tauri.localhost", "https://tauri.localhost", "http://localhost", "http://127.0.0.1", "http://localhost:8091", "http://127.0.0.1:8091":
 		return true
 	default:
 		return false

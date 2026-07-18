@@ -12,6 +12,9 @@ func TestTauriCORSAllowsDesktopOrigins(t *testing.T) {
 	for _, origin := range []string{
 		"tauri://localhost",
 		"http://tauri.localhost",
+		"https://tauri.localhost",
+		"http://localhost",
+		"http://127.0.0.1",
 		"http://localhost:8091",
 		"http://127.0.0.1:8091",
 	} {
