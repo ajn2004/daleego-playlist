@@ -90,6 +90,12 @@ input:focus, select:focus, button:focus-visible, summary:focus-visible {
 .remove-button { color: #f48771 !important; }
 .add-series { margin-top: 14px; }
 .add-series h3, .slot-settings h3 { margin-bottom: 7px; color: #ccc; font-size: 13px; }
+.series-menu { max-height: 200px; margin-bottom: 1rem; overflow-y: auto; border: 1px solid #3f3f46; border-radius: 4px; background: #252526; }
+.series-menu-option { display: flex; width: 100%; align-items: center; gap: .5rem; padding: .4rem .5rem; border: 0 !important; border-bottom: 1px solid #333338 !important; border-radius: 0 !important; text-align: left; }
+.series-menu-option:last-child { border-bottom: 0 !important; }
+.series-menu-option span:first-child { color: #569cd6; font-size: 1.2rem; }
+.series-menu-empty { padding: .5rem; color: #9d9d9d; text-align: center; }
+.inline-status { flex: 0 0 auto; color: #9cdcfe; font-size: .8rem; }
 .slot-settings > div { padding: 0 12px 12px; }
 
 .queue-table-wrap { max-height: 315px !important; overflow: auto !important; }
@@ -97,6 +103,7 @@ input:focus, select:focus, button:focus-visible, summary:focus-visible {
 .queue-table-wrap th { position: sticky; top: 0; z-index: 1; background: #2d2d30 !important; color: #9cdcfe; font-size: 10px; text-transform: uppercase; letter-spacing: .4px; }
 .queue-table-wrap td, .queue-table-wrap th { padding: 7px !important; border-color: #333338 !important; }
 .queue-table-wrap td:nth-child(3), .queue-table-wrap td:nth-child(4) { max-width: 145px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.slot-badge { display: inline-block; padding: .1rem .3rem; border: 1px solid #3f3f46; border-radius: 3px; background: #333337; color: #9cdcfe; font-size: .8rem; }
 .plex-panel-header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 16px 0 7px; }
 .plex-panel-header h3 { margin: 0; color: #fff; font-size: 14px; }
 .plex-panel-header h3 span { color: #9cdcfe; font-size: 11px; font-weight: 500; }

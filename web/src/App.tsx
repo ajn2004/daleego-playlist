@@ -231,6 +231,7 @@ function PlaylistEditor({
   const [targetCount, setTargetCount] = useState(playlist.queue_target_count)
   const [enabled, setEnabled] = useState(playlist.enabled)
   const [seriesSearch, setSeriesSearch] = useState('')
+  const [seriesMenuOpen, setSeriesMenuOpen] = useState(false)
   const [memberMap, setMemberMap] = useState<Record<string, PlaylistSeries>>({})
   const [slots, setSlots] = useState<PlaylistSlot[]>([])
   const [saving, setSaving] = useState(false)
@@ -398,6 +399,22 @@ function PlaylistEditor({
     } catch (e: any) {
       onStatus('Mode update failed: ' + e.message)
     }
+  }
+
+  const setNextEpisode = async (seriesID: string, episodeID: string) => {
+    if (!episodeID) return
+    setNextEpisodePick(episodeID)
+    setSavingNext(true)
+    try {
+      await api.playlists.setCursor(playlist.id, seriesID, episodeID)
+      await loadDetail()
+      onUpdate()
+      setSettingNextFor(null)
+      onStatus('Next episode updated')
+    } catch (e: any) {
+      onStatus('Set next failed: ' + e.message)
+    }
+    setSavingNext(false)
   }
 
   const updateSlot = (idx: number, slotType: string) => {
@@ -667,11 +684,12 @@ function PlaylistEditor({
               </div>
               {isSetting && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.5rem 0.5rem 0.5rem 1rem', borderBottom: '1px solid #eee', background: '#fafafa' }}>
-                  <select
-                    value={nextEpisodePick}
-                    onChange={e => setNextEpisodePick(e.target.value)}
-                    style={{ flex: 1, padding: '0.3rem', borderRadius: 4, border: '1px solid #ccc', fontSize: '0.85rem' }}
-                  >
+                    <select
+                      value={nextEpisodePick}
+                      onChange={e => setNextEpisode(s.series_id, e.target.value)}
+                      disabled={savingNext}
+                      style={{ flex: 1, minWidth: 0, padding: '0.3rem', borderRadius: 4, border: '1px solid #ccc', fontSize: '0.85rem' }}
+                    >
                     <option value="">Select episode...</option>
                     {episodes.map(ep => (
                       <option key={ep.id} value={ep.id}>
@@ -679,26 +697,7 @@ function PlaylistEditor({
                       </option>
                     ))}
                   </select>
-                  <button
-                    onClick={async () => {
-                      if (!nextEpisodePick) return
-                      setSavingNext(true)
-                      try {
-                        await api.playlists.setCursor(playlist.id, s.series_id, nextEpisodePick)
-                        await loadDetail()
-                        onUpdate()
-                        setSettingNextFor(null)
-                        onStatus('Next episode updated')
-                      } catch (e: any) {
-                        onStatus('Set next failed: ' + e.message)
-                      }
-                      setSavingNext(false)
-                    }}
-                    disabled={savingNext || !nextEpisodePick}
-                    style={{ ...smallBtn, background: '#0066cc', color: 'white', border: 'none' }}
-                  >
-                    {savingNext ? 'Saving...' : 'Save'}
-                  </button>
+                  {savingNext && <span className="inline-status">Saving...</span>}
                   <button
                     onClick={() => setSettingNextFor(null)}
                     style={smallBtn}
@@ -714,30 +713,42 @@ function PlaylistEditor({
 
       <div className="add-series">
       <h3>Add series</h3>
-      <input
-        type="text"
-        placeholder="Search series from this media server..."
-        value={seriesSearch}
-        onChange={e => setSeriesSearch(e.target.value)}
-        style={{ width: '100%', padding: '0.4rem', marginBottom: '0.5rem', borderRadius: 4, border: '1px solid #ccc', boxSizing: 'border-box' }}
-      />
-      {seriesSearch && (
-        <div style={{ maxHeight: 200, overflowY: 'auto', border: '1px solid #ddd', borderRadius: 4, marginBottom: '1rem' }}>
-          {availableSeries.length === 0 ? (
-            <div style={{ padding: '0.5rem', color: '#888', textAlign: 'center' }}>No matching series found</div>
-          ) : (
-            availableSeries.map(s => (
-              <div
-                key={s.id}
-                onClick={() => toggleSeries(s.id, true)}
-                style={{ padding: '0.4rem 0.5rem', cursor: 'pointer', borderBottom: '1px solid #eee', display: 'flex', alignItems: 'center', gap: '0.5rem' }}
-              >
-                <span style={{ fontSize: '1.2rem', color: '#0066cc' }}>+</span>
-                <span>{s.title}</span>
-              </div>
-            ))
-          )}
-        </div>
+        <input
+          type="text"
+          placeholder="Search series from this media server..."
+          value={seriesSearch}
+          onChange={e => {
+            setSeriesSearch(e.target.value)
+            setSeriesMenuOpen(true)
+          }}
+          onFocus={() => setSeriesMenuOpen(true)}
+          onBlur={() => setTimeout(() => setSeriesMenuOpen(false), 150)}
+          aria-expanded={seriesMenuOpen}
+          aria-controls="available-series-menu"
+          style={{ width: '100%', padding: '0.4rem', marginBottom: '0.5rem', borderRadius: 4, border: '1px solid #ccc', boxSizing: 'border-box' }}
+        />
+       {seriesMenuOpen && (
+         <div id="available-series-menu" className="series-menu">
+           {availableSeries.length === 0 ? (
+             <div className="series-menu-empty">No matching series found</div>
+           ) : (
+             availableSeries.map(s => (
+               <button
+                 type="button"
+                 key={s.id}
+                 onClick={() => {
+                   toggleSeries(s.id, true)
+                   setSeriesSearch('')
+                   setSeriesMenuOpen(false)
+                 }}
+                 className="series-menu-option"
+               >
+                 <span>+</span>
+                 <span>{s.title}</span>
+               </button>
+             ))
+           )}
+         </div>
       )}
       </div>
 
@@ -785,7 +796,7 @@ function PlaylistEditor({
               <tr key={qi.id}>
                 <td style={tdStyle}>{qi.position}</td>
                 <td style={tdStyle}>
-                  <span style={{ fontSize: '0.8rem', background: '#eee', padding: '0.1rem 0.3rem', borderRadius: 3 }}>
+                  <span className="slot-badge">
                     {qi.slot_type.replace('_', ' ')}
                   </span>
                 </td>
