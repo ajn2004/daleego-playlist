@@ -59,8 +59,8 @@ export default function App() {
     <div className="app-shell">
       <header className="app-header">
         <div>
-          <p className="eyebrow">LOCAL PLEX CONTROL</p>
-          <h1>Daleego Playlists</h1>
+          <p className="eyebrow">LOCAL Beebs CONTROL</p>
+          <h1>Daleego BeebsPalace!</h1>
         </div>
         <p className="header-status"><span /> Local network</p>
       </header>
