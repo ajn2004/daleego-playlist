@@ -43,9 +43,13 @@ input:focus, select:focus, button:focus-visible, summary:focus-visible {
 .section-label { margin: 0 0 8px; color: #9cdcfe; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; }
 .playlist-list, .series-list, .queue-table-wrap { overflow: hidden; border: 1px solid #3f3f46; border-radius: 6px; background: #252526; }
 .playlist-choice { padding: 10px 12px; cursor: pointer; border-bottom: 1px solid #333338; color: #d4d4d4; font-size: 13px; }
+.playlist-choice.playlist-healthy { background: #16351f; }
+.playlist-choice.playlist-low { background: #3a3017; }
+.playlist-choice.playlist-empty { background: #3a1d1d; }
+.playlist-choice.playlist-paused { background: #2d2d30; }
 .playlist-choice:last-child { border-bottom: 0; }
-.playlist-choice:hover { background: #2a2d2e; }
-.playlist-choice.selected { background: #094771; box-shadow: inset 3px 0 #569cd6; color: #fff; }
+.playlist-choice:hover { filter: brightness(1.15); }
+.playlist-choice.selected { box-shadow: inset 3px 0 #569cd6; color: #fff; }
 .playlist-meta { display: flex; justify-content: space-between; margin-top: 4px; color: #858585; font-size: 11px; }
 .playlist-meta .enabled { color: #6a9955; }
 .create-playlist { margin-top: 8px; padding: 10px; background: #252526; border: 1px solid #3f3f46; border-radius: 6px; }

@@ -1245,7 +1245,7 @@ func (s *Service) FillPlaylist(ctx context.Context, playlistID string) (int, err
 			continue
 		}
 
-		selected, ok := selectFillCandidate(candidates, slot.SlotType, globalSlotPos)
+		selected, ok := selectFillCandidate(candidates, slot.SlotType, globalSlotPos, len(members))
 		consumedSlots++
 		if !ok {
 			continue
@@ -1507,7 +1507,7 @@ func (s *Service) SetPlaylistNextEpisode(ctx context.Context, playlistID, series
 	return nil
 }
 
-func selectFillCandidate(candidates []fillCandidate, slotType string, position int) (fillCandidate, bool) {
+func selectFillCandidate(candidates []fillCandidate, slotType string, position, seriesCount int) (fillCandidate, bool) {
 	if len(candidates) == 0 {
 		return fillCandidate{}, false
 	}
@@ -1519,6 +1519,7 @@ func selectFillCandidate(candidates []fillCandidate, slotType string, position i
 
 	switch slotType {
 	case "top_rated":
+		topPoolSize := seriesCount/2 + 1
 		pool = ratedFillCandidates(pool)
 		if len(pool) == 0 {
 			return fillCandidate{}, false
@@ -1529,7 +1530,16 @@ func selectFillCandidate(candidates []fillCandidate, slotType string, position i
 			}
 			return pool[i].seriesID < pool[j].seriesID
 		})
-		return pool[0], true
+		// Pick from the top half of attached series, plus one, so highly rated
+		// episodes remain favored without repeatedly selecting the same top entry.
+		if topPoolSize > len(pool) {
+			topPoolSize = len(pool)
+		}
+		n, err := rand.Int(rand.Reader, big.NewInt(int64(topPoolSize)))
+		if err != nil {
+			return fillCandidate{}, false
+		}
+		return pool[n.Int64()], true
 	case "lowest_rated":
 		pool = ratedFillCandidates(pool)
 		if len(pool) == 0 {

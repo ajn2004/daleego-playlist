@@ -153,7 +153,7 @@ function PlaylistSidebar({
           <div
             key={p.id}
             onClick={() => onSelect(p.id)}
-            className={`playlist-choice ${selectedId === p.id ? 'selected' : ''}`}
+            className={`playlist-choice playlist-${playlistHealth(p)} ${selectedId === p.id ? 'selected' : ''}`}
           >
             <div>{p.name}</div>
               <div className="playlist-meta">
@@ -214,6 +214,13 @@ function PlaylistSidebar({
       )}
     </aside>
   )
+}
+
+function playlistHealth(playlist: Playlist) {
+  if (!playlist.enabled) return 'paused'
+  if (playlist.queue_pending_count >= playlist.queue_target_count) return 'healthy'
+  if (playlist.queue_pending_count > 0) return 'low'
+  return 'empty'
 }
 
 function PlaylistEditor({
@@ -763,7 +770,7 @@ function PlaylistEditor({
               onChange={e => updateSlot(i, e.target.value)}
               style={{ flex: 1, padding: '0.3rem', borderRadius: 4, border: '1px solid #ccc' }}
             >
-              <option value="top_rated">Top Rated</option>
+              <option value="top_rated">Top Rated (Random)</option>
               <option value="any">Any Episode</option>
               <option value="lowest_rated">Lowest Rated</option>
             </select>
