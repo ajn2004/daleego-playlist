@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/andrew/rotator/internal/rotation"
 )
@@ -338,19 +339,30 @@ func (s *Server) handleSetPlaylistSeries(w http.ResponseWriter, r *http.Request)
 	id := r.PathValue("id")
 	var req struct {
 		Series []struct {
-			SeriesID string `json:"series_id"`
-			Mode     string `json:"mode"`
+			SeriesID      string  `json:"series_id"`
+			Mode          string  `json:"mode"`
+			ShowProfileID *string `json:"show_profile_id"`
 		} `json:"series"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json", "Invalid request body")
 		return
 	}
+	seriesIDs := make(map[string]struct{}, len(req.Series))
 	for _, sr := range req.Series {
+		if strings.TrimSpace(sr.SeriesID) == "" {
+			writeError(w, http.StatusBadRequest, "missing_series_id", "series_id is required")
+			return
+		}
 		if sr.Mode != "serial" && sr.Mode != "non_serial" {
 			writeError(w, http.StatusBadRequest, "invalid_mode", "mode must be serial or non_serial")
 			return
 		}
+		if _, exists := seriesIDs[sr.SeriesID]; exists {
+			writeError(w, http.StatusBadRequest, "duplicate_series", "each series can only be added once")
+			return
+		}
+		seriesIDs[sr.SeriesID] = struct{}{}
 	}
 	if err := s.svc.SetPlaylistSeries(r.Context(), id, req.Series); err != nil {
 		writeError(w, http.StatusInternalServerError, "set_failed", err.Error())

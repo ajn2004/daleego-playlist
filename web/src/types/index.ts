@@ -121,6 +121,33 @@ export interface PlaylistSeries {
   total_episodes: number
   watched_episodes: number
   progress_pct: number
+  show_profile_id?: string | null
+  show_profile_name?: string
+  eligible_episodes: number
+}
+
+export interface ShowProfileRule {
+  profile_id?: string
+  season_number?: number
+  episode_id?: string
+  allowed: boolean
+}
+
+export interface ShowProfile {
+  id: string
+  series_id: string
+  name: string
+  default_mode: 'allow' | 'deny'
+  is_default: boolean
+  eligible_episodes: number
+  assignments: number
+  created_at: string
+  updated_at: string
+}
+
+export interface ShowProfileDetail extends ShowProfile {
+  season_rules: ShowProfileRule[]
+  episode_rules: ShowProfileRule[]
 }
 
 export interface PlaylistSlot {

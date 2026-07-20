@@ -96,6 +96,21 @@ make spike
 - `POST /api/v1/playlists/{id}/sync` - Detect playback progress, advance completed serial cursors, and refill the queue
 - `GET /api/v1/playlists/{id}/plex-items` - Read the current Plex playlist order
 - `PUT /api/v1/playlists/{id}/plex-items` - Replace the Plex playlist with ordered episode IDs
+- `GET /api/v1/series/{id}/show-profiles` - List reusable episode filters for a show
+- `POST /api/v1/series/{id}/show-profiles` - Create a show profile
+- `GET|PUT|DELETE /api/v1/series/{id}/show-profiles/{profileID}` - Manage a show profile
+- `POST /api/v1/series/{id}/show-profiles/{profileID}/default` - Set the default for new playlist memberships
+
+## Show Profiles
+
+Each series receives an allow-all `Default` profile. A playlist membership uses
+that profile when the series is added, unless another profile is selected in the
+show-profile workbench. Profiles can allow or exclude whole seasons and then
+override those rules for individual episodes. Episode rules take precedence over
+season rules, which take precedence over the profile's base allow/deny mode.
+
+Editing a profile skips queued episodes that become excluded. Refill the
+affected playlist to replace them and republish its Plex projection.
 
 ## Clients
 

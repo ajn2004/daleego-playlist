@@ -96,7 +96,7 @@ export const api = {
       }),
     delete: (id: string) =>
       request<void>(`/api/v1/playlists/${id}`, { method: 'DELETE' }),
-    setSeries: (id: string, series: { series_id: string; mode: string }[]) =>
+    setSeries: (id: string, series: { series_id: string; mode: string; show_profile_id?: string | null }[]) =>
       request<import('../types').Playlist>(`/api/v1/playlists/${id}/series`, {
         method: 'PUT',
         body: JSON.stringify({ series }),
@@ -130,5 +130,14 @@ export const api = {
         method: 'POST',
         body: JSON.stringify({ episode_id: episodeId }),
       }),
+  },
+
+  showProfiles: {
+    list: (seriesId: string) => request<{ show_profiles: import('../types').ShowProfile[] }>(`/api/v1/series/${seriesId}/show-profiles`),
+    get: (seriesId: string, profileId: string) => request<import('../types').ShowProfileDetail>(`/api/v1/series/${seriesId}/show-profiles/${profileId}`),
+    create: (seriesId: string, data: { name: string; default_mode: 'allow' | 'deny' }) => request<import('../types').ShowProfileDetail>(`/api/v1/series/${seriesId}/show-profiles`, { method: 'POST', body: JSON.stringify(data) }),
+    update: (seriesId: string, profileId: string, data: { name: string; default_mode: 'allow' | 'deny'; season_rules: import('../types').ShowProfileRule[]; episode_rules: import('../types').ShowProfileRule[] }) => request<import('../types').ShowProfileDetail>(`/api/v1/series/${seriesId}/show-profiles/${profileId}`, { method: 'PUT', body: JSON.stringify(data) }),
+    delete: (seriesId: string, profileId: string) => request<void>(`/api/v1/series/${seriesId}/show-profiles/${profileId}`, { method: 'DELETE' }),
+    setDefault: (seriesId: string, profileId: string) => request<import('../types').ShowProfileDetail>(`/api/v1/series/${seriesId}/show-profiles/${profileId}/default`, { method: 'POST' }),
   },
 }

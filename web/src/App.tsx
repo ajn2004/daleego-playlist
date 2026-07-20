@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { api, apiBaseURL } from './api/client'
 import type { Playlist, Series, PlaylistSeries, PlaylistSlot, PlaylistQueueItem, MediaServer, Episode, PlexPlaylistItem } from './types'
+import { ShowProfileWorkbench } from './components/ShowProfileWorkbench'
 
 export default function App() {
   const [playlists, setPlaylists] = useState<Playlist[]>([])
@@ -50,6 +51,16 @@ export default function App() {
     fetchPlaylists()
   }
 
+  const handlePlaylistUpdate = (updatedPlaylist?: Playlist) => {
+    if (!updatedPlaylist) {
+      fetchPlaylists()
+      return
+    }
+    setPlaylists(current => current.map(playlist =>
+      playlist.id === updatedPlaylist.id ? updatedPlaylist : playlist
+    ))
+  }
+
   const showStatus = (msg: string) => {
     setStatus(msg)
     setTimeout(() => setStatus(''), 5000)
@@ -92,12 +103,7 @@ export default function App() {
               playlist={selectedPlaylist}
               series={series}
               servers={servers}
-              onUpdate={() => {
-                fetchPlaylists()
-                const id = selectedId
-                setSelectedId(null)
-                setTimeout(() => setSelectedId(id), 50)
-              }}
+              onUpdate={handlePlaylistUpdate}
               onStatus={showStatus}
             />
           ) : (
@@ -229,7 +235,7 @@ function PlaylistEditor({
   playlist: Playlist
   series: Series[]
   servers: MediaServer[]
-  onUpdate: () => void
+  onUpdate: (updatedPlaylist?: Playlist) => void
   onStatus: (msg: string) => void
 }) {
   const [detail, setDetail] = useState<Playlist | null>(null)
@@ -239,6 +245,7 @@ function PlaylistEditor({
   const [enabled, setEnabled] = useState(playlist.enabled)
   const [seriesSearch, setSeriesSearch] = useState('')
   const [seriesMenuOpen, setSeriesMenuOpen] = useState(false)
+  const [addingSeriesID, setAddingSeriesID] = useState<string | null>(null)
   const [memberMap, setMemberMap] = useState<Record<string, PlaylistSeries>>({})
   const [slots, setSlots] = useState<PlaylistSlot[]>([])
   const [saving, setSaving] = useState(false)
@@ -257,6 +264,7 @@ function PlaylistEditor({
   const [plexSaving, setPlexSaving] = useState(false)
   const [plexSeriesID, setPlexSeriesID] = useState('')
   const [plexEpisodeID, setPlexEpisodeID] = useState('')
+  const [profileWorkbenchFor, setProfileWorkbenchFor] = useState<string | null>(null)
 
   useEffect(() => {
     loadDetail()
@@ -378,11 +386,19 @@ function PlaylistEditor({
       : current.filter(s => s.series_id !== seriesId).map(s => ({ series_id: s.series_id, mode: s.mode }))
 
     try {
-      await api.playlists.setSeries(playlist.id, updated)
-      await loadDetail()
-      onUpdate()
+      if (add) setAddingSeriesID(seriesId)
+      const updatedPlaylist = await api.playlists.setSeries(playlist.id, updated)
+      setDetail(updatedPlaylist)
+      onUpdate(updatedPlaylist)
+      if (add) {
+        setSeriesSearch('')
+        setSeriesMenuOpen(false)
+        onStatus('Series added to playlist')
+      }
     } catch (e: any) {
       onStatus('Series update failed: ' + e.message)
+    } finally {
+      if (add) setAddingSeriesID(null)
     }
   }
 
@@ -406,6 +422,13 @@ function PlaylistEditor({
     } catch (e: any) {
       onStatus('Mode update failed: ' + e.message)
     }
+  }
+
+  const assignProfile = async (seriesId: string, profileId: string) => {
+    const updated = (detail?.series || []).map(s => ({ series_id: s.series_id, mode: s.mode, show_profile_id: s.series_id === seriesId ? profileId : s.show_profile_id }))
+    const result = await api.playlists.setSeries(playlist.id, updated)
+    setDetail(result)
+    onUpdate(result)
   }
 
   const setNextEpisode = async (seriesID: string, episodeID: string) => {
@@ -681,6 +704,7 @@ function PlaylistEditor({
                   <option value="serial">Serial</option>
                   <option value="non_serial">Random</option>
                 </select>
+                <button onClick={() => setProfileWorkbenchFor(s.series_id)} style={smallBtn}>Profile</button>
                 <button
                   onClick={() => toggleSeries(s.series_id, false)}
                   className="icon-button remove-button"
@@ -739,21 +763,21 @@ function PlaylistEditor({
            {availableSeries.length === 0 ? (
              <div className="series-menu-empty">No matching series found</div>
            ) : (
-             availableSeries.map(s => (
-               <button
-                 type="button"
-                 key={s.id}
-                 onClick={() => {
-                   toggleSeries(s.id, true)
-                   setSeriesSearch('')
-                   setSeriesMenuOpen(false)
-                 }}
-                 className="series-menu-option"
-               >
-                 <span>+</span>
-                 <span>{s.title}</span>
-               </button>
-             ))
+              availableSeries.map(s => (
+                <button
+                  type="button"
+                  key={s.id}
+                  disabled={addingSeriesID !== null}
+                  onMouseDown={e => e.preventDefault()}
+                  onClick={() => {
+                    toggleSeries(s.id, true)
+                  }}
+                  className="series-menu-option"
+                >
+                  <span>+</span>
+                  <span>{addingSeriesID === s.id ? 'Adding...' : s.title}</span>
+                </button>
+              ))
            )}
          </div>
       )}
@@ -870,6 +894,10 @@ function PlaylistEditor({
       )}
       </section>
       </div>
+      {profileWorkbenchFor && (() => {
+        const member = (detail.series || []).find(s => s.series_id === profileWorkbenchFor)
+        return member ? <ShowProfileWorkbench playlistId={playlist.id} seriesId={member.series_id} title={member.title} assignedProfileId={member.show_profile_id} onAssign={(profileId) => assignProfile(member.series_id, profileId)} onClose={() => { setProfileWorkbenchFor(null); loadDetail() }} onStatus={onStatus} /> : null
+      })()}
     </div>
   )
 }

@@ -29,6 +29,7 @@ type Service struct {
 	bindingRepo      *repository.BindingRepo
 	playlistRepo     *repository.PlaylistRepo
 	queueBindingRepo *repository.QueueBindingRepo
+	showProfileRepo  *repository.ShowProfileRepo
 
 	engine *rotation.Engine
 }
@@ -45,6 +46,7 @@ func New(
 	bindingRepo *repository.BindingRepo,
 	playlistRepo *repository.PlaylistRepo,
 	queueBindingRepo *repository.QueueBindingRepo,
+	showProfileRepo *repository.ShowProfileRepo,
 	engine *rotation.Engine,
 ) *Service {
 	return &Service{
@@ -59,6 +61,7 @@ func New(
 		bindingRepo:      bindingRepo,
 		playlistRepo:     playlistRepo,
 		queueBindingRepo: queueBindingRepo,
+		showProfileRepo:  showProfileRepo,
 		engine:           engine,
 	}
 }
@@ -834,6 +837,9 @@ type PlaylistSeriesResponse struct {
 	TotalEpisodes     int     `json:"total_episodes"`
 	WatchedEpisodes   int     `json:"watched_episodes"`
 	ProgressPct       float64 `json:"progress_pct"`
+	ShowProfileID     *string `json:"show_profile_id,omitempty"`
+	ShowProfileName   string  `json:"show_profile_name,omitempty"`
+	EligibleEpisodes  int     `json:"eligible_episodes"`
 }
 
 type PlaylistQueueResponse struct {
@@ -947,14 +953,25 @@ func (s *Service) GetPlaylist(ctx context.Context, id string) (*PlaylistResponse
 			continue
 		}
 		sr := PlaylistSeriesResponse{
-			ID:       m.ID,
-			SeriesID: m.SeriesID,
-			Title:    ser.Title,
-			Mode:     m.Mode,
+			ID:            m.ID,
+			SeriesID:      m.SeriesID,
+			Title:         ser.Title,
+			Mode:          m.Mode,
+			ShowProfileID: m.ShowProfileID,
+		}
+		if m.ShowProfileID != nil {
+			if profile, err := s.showProfileRepo.GetByID(ctx, *m.ShowProfileID); err == nil {
+				sr.ShowProfileName = profile.Name
+			}
 		}
 
 		total, _ := s.episodeRepo.CountBySeries(ctx, m.SeriesID)
 		sr.TotalEpisodes = total
+		if episodes, err := s.episodeRepo.ListBySeries(ctx, m.SeriesID); err == nil {
+			if rules, err := s.profileRules(ctx, m.ShowProfileID); err == nil {
+				sr.EligibleEpisodes = len(filterAllowedEpisodes(episodes, rules))
+			}
+		}
 
 		if m.Mode == "serial" {
 			progress, _ := s.playlistRepo.GetProgress(ctx, m.ID)
@@ -1055,8 +1072,9 @@ func (s *Service) DeletePlaylist(ctx context.Context, id string) error {
 }
 
 func (s *Service) SetPlaylistSeries(ctx context.Context, playlistID string, series []struct {
-	SeriesID string `json:"series_id"`
-	Mode     string `json:"mode"`
+	SeriesID      string  `json:"series_id"`
+	Mode          string  `json:"mode"`
+	ShowProfileID *string `json:"show_profile_id"`
 }) error {
 	playlist, err := s.playlistRepo.GetByID(ctx, playlistID)
 	if err != nil {
@@ -1068,9 +1086,9 @@ func (s *Service) SetPlaylistSeries(ctx context.Context, playlistID string, seri
 	if err != nil {
 		return fmt.Errorf("list current: %w", err)
 	}
-	currentSet := make(map[string]bool)
+	currentSet := make(map[string]repository.PlaylistSeries)
 	for _, m := range current {
-		currentSet[m.SeriesID] = true
+		currentSet[m.SeriesID] = m
 	}
 
 	input := make([]repository.PlaylistSeriesInput, 0, len(series))
@@ -1091,15 +1109,30 @@ func (s *Service) SetPlaylistSeries(ctx context.Context, playlistID string, seri
 		if err != nil {
 			return fmt.Errorf("count episodes for %s: %w", sr.SeriesID, err)
 		}
-		if !currentSet[sr.SeriesID] || episodeCount == 0 {
+		if _, exists := currentSet[sr.SeriesID]; !exists || episodeCount == 0 {
 			if err := s.importEpisodes(ctx, ser); err != nil {
 				return fmt.Errorf("import episodes for %s: %w", sr.SeriesID, err)
 			}
 		}
 
+		profileID := sr.ShowProfileID
+		if profileID != nil {
+			if _, err := s.profileForSeries(ctx, sr.SeriesID, *profileID); err != nil {
+				return err
+			}
+		} else if existing, ok := currentSet[sr.SeriesID]; ok {
+			profileID = existing.ShowProfileID
+		} else {
+			profile, err := s.showProfileRepo.EnsureDefaultForSeries(ctx, sr.SeriesID, uuid.NewString())
+			if err != nil {
+				return err
+			}
+			profileID = &profile.ID
+		}
 		input = append(input, repository.PlaylistSeriesInput{
-			SeriesID: sr.SeriesID,
-			Mode:     sr.Mode,
+			SeriesID:      sr.SeriesID,
+			Mode:          sr.Mode,
+			ShowProfileID: profileID,
 		})
 	}
 
@@ -1299,6 +1332,10 @@ func (s *Service) FillPlaylist(ctx context.Context, playlistID string) (int, err
 }
 
 func (s *Service) getPlaylistEpisode(ctx context.Context, member repository.PlaylistSeries, playlistID string, queued map[string]bool) (string, float64, error) {
+	rules, err := s.profileRules(ctx, member.ShowProfileID)
+	if err != nil {
+		return "", 0, err
+	}
 	if member.Mode == "serial" {
 		progress, err := s.playlistRepo.GetProgress(ctx, member.ID)
 		if err != nil {
@@ -1315,7 +1352,7 @@ func (s *Service) getPlaylistEpisode(ctx context.Context, member repository.Play
 			return "", 0, nil
 		}
 
-		if ep, ok := firstUnqueuedEpisodeAtCursor(episodes, *progress.NextEpisodeID, progress.NextPosition, queued); ok {
+		if ep, ok := firstAllowedUnqueuedEpisodeAtCursor(episodes, *progress.NextEpisodeID, progress.NextPosition, queued, rules); ok {
 			return ep.ID, ep.Rating, nil
 		}
 		return "", 0, nil
@@ -1335,13 +1372,9 @@ func (s *Service) getPlaylistEpisode(ctx context.Context, member repository.Play
 		return "", 0, nil
 	}
 
-	if len(history) >= len(episodes) {
-		return "", 0, nil
-	}
-
 	var eligible []repository.Episode
 	for _, ep := range episodes {
-		if history[ep.ID] || queued[ep.ID] {
+		if !rules.Allows(ep) || history[ep.ID] || queued[ep.ID] {
 			continue
 		}
 		eligible = append(eligible, ep)
@@ -1360,6 +1393,10 @@ func (s *Service) getPlaylistEpisode(ctx context.Context, member repository.Play
 }
 
 func firstUnqueuedEpisodeAtCursor(episodes []repository.Episode, nextEpisodeID string, nextPosition *int, queued map[string]bool) (repository.Episode, bool) {
+	return firstAllowedUnqueuedEpisodeAtCursor(episodes, nextEpisodeID, nextPosition, queued, ShowProfileRules{DefaultAllow: true})
+}
+
+func firstAllowedUnqueuedEpisodeAtCursor(episodes []repository.Episode, nextEpisodeID string, nextPosition *int, queued map[string]bool, rules ShowProfileRules) (repository.Episode, bool) {
 	atCursor := nextPosition != nil
 	for _, ep := range episodes {
 		if !atCursor {
@@ -1374,6 +1411,9 @@ func firstUnqueuedEpisodeAtCursor(episodes []repository.Episode, nextEpisodeID s
 		if queued[ep.ID] {
 			continue
 		}
+		if !rules.Allows(ep) {
+			continue
+		}
 		return ep, true
 	}
 	return repository.Episode{}, false
@@ -1384,6 +1424,11 @@ func (s *Service) initPlaylistCursor(ctx context.Context, member repository.Play
 	if err != nil {
 		return "", 0, err
 	}
+	rules, err := s.profileRules(ctx, member.ShowProfileID)
+	if err != nil {
+		return "", 0, err
+	}
+	episodes = filterAllowedEpisodes(episodes, rules)
 	if len(episodes) == 0 {
 		return "", 0, fmt.Errorf("no episodes found")
 	}
@@ -1421,6 +1466,10 @@ func (s *Service) advancePlaylistCursor(ctx context.Context, playlistSeriesID, w
 	if err != nil {
 		return err
 	}
+	rules, err := s.profileRules(ctx, member.ShowProfileID)
+	if err != nil {
+		return err
+	}
 
 	var nextEpisode *repository.Episode
 	advance := false
@@ -1429,7 +1478,7 @@ func (s *Service) advancePlaylistCursor(ctx context.Context, playlistSeriesID, w
 			advance = true
 			continue
 		}
-		if advance {
+		if advance && rules.Allows(ep) {
 			nextEpisode = &ep
 			break
 		}
@@ -1488,6 +1537,13 @@ func (s *Service) SetPlaylistNextEpisode(ctx context.Context, playlistID, series
 	}
 	if member == nil {
 		return fmt.Errorf("series not in playlist")
+	}
+	rules, err := s.profileRules(ctx, member.ShowProfileID)
+	if err != nil {
+		return err
+	}
+	if !rules.Allows(*ep) {
+		return fmt.Errorf("episode is excluded by this show's profile")
 	}
 
 	progress := &repository.PlaylistProgress{

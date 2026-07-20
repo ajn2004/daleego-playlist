@@ -49,6 +49,7 @@ func New(ctx context.Context, cfg *config.Config) (*Server, error) {
 	playlistRepo := repository.NewPlaylistRepo(pool)
 	serverRepo := repository.NewServerRepo(pool)
 	queueBindingRepo := repository.NewQueueBindingRepo(pool)
+	showProfileRepo := repository.NewShowProfileRepo(pool)
 
 	svc := service.New(
 		cfg.PlexPlaylistName,
@@ -62,6 +63,7 @@ func New(ctx context.Context, cfg *config.Config) (*Server, error) {
 		bindingRepo,
 		playlistRepo,
 		queueBindingRepo,
+		showProfileRepo,
 		rotation.NewEngine(),
 	)
 
@@ -102,6 +104,13 @@ func (s *Server) buildRouter() http.Handler {
 		r.Patch("/series/{id}", s.handleUpdateSeries)
 		r.Post("/series/{id}/sync", s.handleSyncSeries)
 		r.Post("/series/{id}/reconcile", s.handleReconcileSeries)
+		r.Get("/series/{id}/show-profiles", s.handleListShowProfiles)
+		r.Post("/series/{id}/show-profiles", s.handleCreateShowProfile)
+		r.Get("/series/{id}/show-profiles/{profileID}", s.handleGetShowProfile)
+		r.Put("/series/{id}/show-profiles/{profileID}", s.handleUpdateShowProfile)
+		r.Delete("/series/{id}/show-profiles/{profileID}", s.handleDeleteShowProfile)
+		r.Post("/series/{id}/show-profiles/{profileID}/default", s.handleSetDefaultShowProfile)
+		r.Get("/series/{id}/show-profiles/{profileID}/preview", s.handlePreviewShowProfile)
 
 		r.Get("/rotation-profiles", s.handleListProfiles)
 		r.Post("/rotation-profiles", s.handleCreateProfile)

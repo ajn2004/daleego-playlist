@@ -29,11 +29,12 @@ type PlaylistSlot struct {
 }
 
 type PlaylistSeries struct {
-	ID         string    `json:"id"`
-	PlaylistID string    `json:"playlist_id"`
-	SeriesID   string    `json:"series_id"`
-	Mode       string    `json:"mode"`
-	CreatedAt  time.Time `json:"created_at"`
+	ID            string    `json:"id"`
+	PlaylistID    string    `json:"playlist_id"`
+	SeriesID      string    `json:"series_id"`
+	Mode          string    `json:"mode"`
+	ShowProfileID *string   `json:"show_profile_id"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 type PlaylistProgress struct {
@@ -206,8 +207,9 @@ func (r *PlaylistRepo) ListSlots(ctx context.Context, playlistID string) ([]Play
 // --- Series membership ---
 
 type PlaylistSeriesInput struct {
-	SeriesID string
-	Mode     string
+	SeriesID      string
+	Mode          string
+	ShowProfileID *string
 }
 
 func (r *PlaylistRepo) SetPlaylistSeries(ctx context.Context, playlistID string, newSeries []PlaylistSeriesInput) error {
@@ -217,9 +219,23 @@ func (r *PlaylistRepo) SetPlaylistSeries(ctx context.Context, playlistID string,
 	}
 	defer tx.Rollback(ctx)
 
-	current, err := r.ListSeries(ctx, playlistID)
+	rows, err := tx.Query(ctx,
+		`SELECT id, playlist_id, series_id, mode, show_profile_id, created_at FROM playlist_series WHERE playlist_id = $1 ORDER BY created_at`, playlistID)
 	if err != nil {
 		return fmt.Errorf("list current: %w", err)
+	}
+	defer rows.Close()
+
+	var current []PlaylistSeries
+	for rows.Next() {
+		var member PlaylistSeries
+		if err := rows.Scan(&member.ID, &member.PlaylistID, &member.SeriesID, &member.Mode, &member.ShowProfileID, &member.CreatedAt); err != nil {
+			return fmt.Errorf("scan current member: %w", err)
+		}
+		current = append(current, member)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate current members: %w", err)
 	}
 
 	currentMap := make(map[string]PlaylistSeries) // seriesID -> member
@@ -227,9 +243,9 @@ func (r *PlaylistRepo) SetPlaylistSeries(ctx context.Context, playlistID string,
 		currentMap[m.SeriesID] = m
 	}
 
-	newSet := make(map[string]string) // seriesID -> mode
+	newSet := make(map[string]struct{})
 	for _, ns := range newSeries {
-		newSet[ns.SeriesID] = ns.Mode
+		newSet[ns.SeriesID] = struct{}{}
 	}
 
 	// Delete removed members — nullify queue refs first, then delete
@@ -244,25 +260,26 @@ func (r *PlaylistRepo) SetPlaylistSeries(ctx context.Context, playlistID string,
 		}
 	}
 
-	// Add new members, update mode on existing
+	// Add new members, update selection behavior on existing members.
 	for _, ns := range newSeries {
 		if existing, ok := currentMap[ns.SeriesID]; ok {
-			if existing.Mode != ns.Mode {
-				if _, err := tx.Exec(ctx, `UPDATE playlist_series SET mode = $1 WHERE id = $2`, ns.Mode, existing.ID); err != nil {
-					return fmt.Errorf("update mode: %w", err)
+			profileChanged := !sameOptionalString(existing.ShowProfileID, ns.ShowProfileID)
+			if existing.Mode != ns.Mode || profileChanged {
+				if _, err := tx.Exec(ctx, `UPDATE playlist_series SET mode = $1, show_profile_id = $2 WHERE id = $3`, ns.Mode, ns.ShowProfileID, existing.ID); err != nil {
+					return fmt.Errorf("update playlist series: %w", err)
 				}
-				// Queue entries were selected using the old eligibility mode.
-				// Preserve an actively watched item, but replace the rest on the next fill.
+				// Preserve a currently watched episode, but replace queue entries whose
+				// eligibility was determined under the former mode or profile.
 				if _, err := tx.Exec(ctx,
 					`UPDATE playlist_queue_items SET status = 'skipped'
 					 WHERE playlist_id = $1 AND series_id = $2 AND status IN ('pending', 'pushed')`, playlistID, ns.SeriesID); err != nil {
-					return fmt.Errorf("skip queue entries for mode change: %w", err)
+					return fmt.Errorf("skip queue entries for selection change: %w", err)
 				}
 			}
 		} else {
 			if _, err := tx.Exec(ctx,
-				`INSERT INTO playlist_series (id, playlist_id, series_id, mode, created_at) VALUES (gen_random_uuid(), $1, $2, $3, now())`,
-				playlistID, ns.SeriesID, ns.Mode); err != nil {
+				`INSERT INTO playlist_series (id, playlist_id, series_id, mode, show_profile_id, created_at) VALUES (gen_random_uuid(), $1, $2, $3, $4, now())`,
+				playlistID, ns.SeriesID, ns.Mode, ns.ShowProfileID); err != nil {
 				return fmt.Errorf("insert member: %w", err)
 			}
 		}
@@ -273,7 +290,7 @@ func (r *PlaylistRepo) SetPlaylistSeries(ctx context.Context, playlistID string,
 
 func (r *PlaylistRepo) ListSeries(ctx context.Context, playlistID string) ([]PlaylistSeries, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, playlist_id, series_id, mode, created_at FROM playlist_series WHERE playlist_id = $1 ORDER BY created_at`, playlistID)
+		`SELECT id, playlist_id, series_id, mode, show_profile_id, created_at FROM playlist_series WHERE playlist_id = $1 ORDER BY created_at`, playlistID)
 	if err != nil {
 		return nil, fmt.Errorf("list playlist series: %w", err)
 	}
@@ -282,7 +299,7 @@ func (r *PlaylistRepo) ListSeries(ctx context.Context, playlistID string) ([]Pla
 	var series []PlaylistSeries
 	for rows.Next() {
 		var ps PlaylistSeries
-		if err := rows.Scan(&ps.ID, &ps.PlaylistID, &ps.SeriesID, &ps.Mode, &ps.CreatedAt); err != nil {
+		if err := rows.Scan(&ps.ID, &ps.PlaylistID, &ps.SeriesID, &ps.Mode, &ps.ShowProfileID, &ps.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan playlist series: %w", err)
 		}
 		series = append(series, ps)
@@ -292,15 +309,22 @@ func (r *PlaylistRepo) ListSeries(ctx context.Context, playlistID string) ([]Pla
 
 func (r *PlaylistRepo) GetPlaylistSeriesByID(ctx context.Context, id string) (*PlaylistSeries, error) {
 	row := r.pool.QueryRow(ctx,
-		`SELECT id, playlist_id, series_id, mode, created_at FROM playlist_series WHERE id = $1`, id)
+		`SELECT id, playlist_id, series_id, mode, show_profile_id, created_at FROM playlist_series WHERE id = $1`, id)
 	var ps PlaylistSeries
-	if err := row.Scan(&ps.ID, &ps.PlaylistID, &ps.SeriesID, &ps.Mode, &ps.CreatedAt); err != nil {
+	if err := row.Scan(&ps.ID, &ps.PlaylistID, &ps.SeriesID, &ps.Mode, &ps.ShowProfileID, &ps.CreatedAt); err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, fmt.Errorf("playlist series not found")
 		}
 		return nil, fmt.Errorf("get playlist series: %w", err)
 	}
 	return &ps, nil
+}
+
+func sameOptionalString(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }
 
 // --- Progress ---
