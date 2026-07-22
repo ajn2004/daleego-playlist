@@ -155,3 +155,18 @@ func TestFirstUnqueuedEpisodeAtCursorLooksAhead(t *testing.T) {
 		t.Fatalf("expected next unqueued episode e3, got %#v", got)
 	}
 }
+
+func TestEligibleRandomEpisodesUsesOnlyRecentHistory(t *testing.T) {
+	episodes := []repository.Episode{{ID: "old"}, {ID: "recent"}, {ID: "queued"}, {ID: "available"}}
+	got := eligibleRandomEpisodes(episodes, ShowProfileRules{DefaultAllow: true}, map[string]bool{"recent": true}, map[string]bool{"queued": true})
+	if len(got) != 2 || got[0].ID != "old" || got[1].ID != "available" {
+		t.Fatalf("expected old and available episodes to be eligible, got %#v", got)
+	}
+}
+
+func TestEffectiveRandomEpisodeCooldownLeavesAnEpisodeAvailable(t *testing.T) {
+	episodes := []repository.Episode{{ID: "e1"}, {ID: "e2"}, {ID: "e3"}}
+	if got := effectiveRandomEpisodeCooldown(episodes, ShowProfileRules{DefaultAllow: true}, map[string]bool{"e3": true}, 10); got != 1 {
+		t.Fatalf("expected cooldown to be capped at one available episode, got %d", got)
+	}
+}

@@ -382,8 +382,8 @@ function PlaylistEditor({
   const toggleSeries = async (seriesId: string, add: boolean) => {
     const current = detail?.series || []
     const updated = add
-      ? [...current.map(s => ({ series_id: s.series_id, mode: s.mode })), { series_id: seriesId, mode: 'serial' as const }]
-      : current.filter(s => s.series_id !== seriesId).map(s => ({ series_id: s.series_id, mode: s.mode }))
+	  ? [...current.map(s => ({ series_id: s.series_id, mode: s.mode, random_episode_cooldown: s.random_episode_cooldown, show_profile_id: s.show_profile_id })), { series_id: seriesId, mode: 'serial' as const, random_episode_cooldown: 10 }]
+	  : current.filter(s => s.series_id !== seriesId).map(s => ({ series_id: s.series_id, mode: s.mode, random_episode_cooldown: s.random_episode_cooldown, show_profile_id: s.show_profile_id }))
 
     try {
       if (add) setAddingSeriesID(seriesId)
@@ -404,10 +404,12 @@ function PlaylistEditor({
 
   const setSeriesMode = async (seriesId: string, mode: 'serial' | 'non_serial') => {
     const current = detail?.series || []
-    const updated = current.map(s => ({
-      series_id: s.series_id,
-      mode: s.series_id === seriesId ? mode : s.mode,
-    }))
+      const updated = current.map(s => ({
+        series_id: s.series_id,
+        mode: s.series_id === seriesId ? mode : s.mode,
+		random_episode_cooldown: s.random_episode_cooldown,
+		show_profile_id: s.show_profile_id,
+      }))
     try {
       const updatedPlaylist = await api.playlists.setSeries(playlist.id, updated)
       console.log(updatedPlaylist)
@@ -423,6 +425,23 @@ function PlaylistEditor({
       onStatus('Mode update failed: ' + e.message)
     }
   }
+
+	const setRandomEpisodeCooldown = async (seriesId: string, cooldown: number) => {
+		const updated = (detail?.series || []).map(s => ({
+			series_id: s.series_id,
+			mode: s.mode,
+			random_episode_cooldown: s.series_id === seriesId ? cooldown : s.random_episode_cooldown,
+			show_profile_id: s.show_profile_id,
+		}))
+		try {
+			const updatedPlaylist = await api.playlists.setSeries(playlist.id, updated)
+			setDetail(updatedPlaylist)
+			onUpdate(updatedPlaylist)
+			onStatus(`Random episode cooldown set to ${cooldown} plays`)
+		} catch (e: any) {
+			onStatus('Cooldown update failed: ' + e.message)
+		}
+	}
 
   const assignProfile = async (seriesId: string, profileId: string) => {
     const updated = (detail?.series || []).map(s => ({ series_id: s.series_id, mode: s.mode, show_profile_id: s.series_id === seriesId ? profileId : s.show_profile_id }))
@@ -654,8 +673,19 @@ function PlaylistEditor({
           return (
             <React.Fragment key={s.id}>
               <div className="series-card" style={{ '--progress': `${remainingPct}%`, '--runway-color': `hsl(${Math.max(0, Math.min(120, remainingPct * 1.2))} 63% 42%)` } as React.CSSProperties}>
-                <div className="series-details">
+                <div className="series-card-header">
                   <div className="series-title">{s.title}</div>
+                  <div className="progress-stat"><strong>{progressPct.toFixed(0)}%</strong><span>complete</span></div>
+                </div>
+                <button
+                  className="series-mode-toggle"
+                  onClick={() => setSeriesMode(s.series_id, ps.mode === 'serial' ? 'non_serial' : 'serial')}
+                  title={ps.mode === 'serial' ? 'Switch to random episode order' : 'Switch to serial episode order'}
+                  aria-label={ps.mode === 'serial' ? 'Switch to random episode order' : 'Switch to serial episode order'}
+                >
+                  {ps.mode === 'serial' ? 'S' : 'R'}
+                </button>
+                <div className="series-details">
                   <div className="series-next">
                     {ps.mode === 'serial' ? (
                       ps.next_episode_title ? (
@@ -675,43 +705,48 @@ function PlaylistEditor({
                     <span className="series-progress-copy">{watchedEpisodes}/{ps.total_episodes} watched · {Math.max(ps.total_episodes - watchedEpisodes, 0)} left</span>
                   </div>
                 </div>
-                <div className="progress-stat"><strong>{progressPct.toFixed(0)}%</strong><span>complete</span></div>
-                {ps.mode === 'serial' && ps.total_episodes > 0 && (
-                  <button
-                    onClick={async () => {
-                      setSettingNextFor(s.series_id)
-                      setNextEpisodePick(ps.next_episode_id || '')
-                      if (!episodeCache[s.series_id]) {
-                        try {
-                          const res = await api.playlists.listEpisodes(playlist.id, s.series_id)
-                          setEpisodeCache(prev => ({ ...prev, [s.series_id]: res.episodes }))
-                        } catch (e: any) {
-                          onStatus('Failed to load episodes: ' + e.message)
+                <div className="series-card-actions">
+                  {ps.mode === 'serial' && ps.total_episodes > 0 && (
+                    <button
+                      onClick={async () => {
+                        setSettingNextFor(s.series_id)
+                        setNextEpisodePick(ps.next_episode_id || '')
+                        if (!episodeCache[s.series_id]) {
+                          try {
+                            const res = await api.playlists.listEpisodes(playlist.id, s.series_id)
+                            setEpisodeCache(prev => ({ ...prev, [s.series_id]: res.episodes }))
+                          } catch (e: any) {
+                            onStatus('Failed to load episodes: ' + e.message)
+                          }
                         }
-                      }
-                    }}
-                    style={{ ...smallBtn, fontSize: '0.8rem' }}
-                    title="Set next episode"
+                      }}
+                      style={{ ...smallBtn, fontSize: '0.8rem' }}
+                      title="Set next episode"
+                    >
+                      Set Next
+                    </button>
+                  )}
+                  {ps.mode === 'non_serial' && (
+                    <label title="Episodes return to the random pool after this many other completed plays">
+                      Cooldown
+                      <input
+                        type="number"
+                        min={0}
+                        value={ps.random_episode_cooldown}
+                        onChange={e => setRandomEpisodeCooldown(s.series_id, Math.max(0, Number(e.target.value) || 0))}
+                        style={{ width: '3.5rem', marginLeft: '0.25rem', padding: '0.2rem', borderRadius: 4, border: '1px solid #ccc', fontSize: '0.85rem' }}
+                      />
+                    </label>
+                  )}
+                  <button onClick={() => setProfileWorkbenchFor(s.series_id)} style={smallBtn}>Profile</button>
+                  <button
+                    onClick={() => toggleSeries(s.series_id, false)}
+                    className="icon-button remove-button"
+                    title="Remove from playlist"
                   >
-                    Set Next
+                    Remove
                   </button>
-                )}
-                <select
-                  value={ps.mode}
-                  onChange={e => setSeriesMode(ps.series_id, e.target.value as 'serial' | 'non_serial')}
-                  style={{ padding: '0.2rem', borderRadius: 4, border: '1px solid #ccc', fontSize: '0.85rem' }}
-                >
-                  <option value="serial">Serial</option>
-                  <option value="non_serial">Random</option>
-                </select>
-                <button onClick={() => setProfileWorkbenchFor(s.series_id)} style={smallBtn}>Profile</button>
-                <button
-                  onClick={() => toggleSeries(s.series_id, false)}
-                  className="icon-button remove-button"
-                  title="Remove from playlist"
-                >
-                  Remove
-                </button>
+                </div>
               </div>
               {isSetting && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.5rem 0.5rem 0.5rem 1rem', borderBottom: '1px solid #eee', background: '#fafafa' }}>
@@ -727,7 +762,7 @@ function PlaylistEditor({
                         S{String(ep.season_number).padStart(2, '0')}E{String(ep.episode_number).padStart(2, '0')} - {ep.title} ({ep.rating > 0 ? `Rating ${ep.rating.toFixed(1)}` : 'Rating unavailable'})
                       </option>
                     ))}
-                  </select>
+                    </select>
                   {savingNext && <span className="inline-status">Saving...</span>}
                   <button
                     onClick={() => setSettingNextFor(null)}

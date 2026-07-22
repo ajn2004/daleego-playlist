@@ -339,9 +339,10 @@ func (s *Server) handleSetPlaylistSeries(w http.ResponseWriter, r *http.Request)
 	id := r.PathValue("id")
 	var req struct {
 		Series []struct {
-			SeriesID      string  `json:"series_id"`
-			Mode          string  `json:"mode"`
-			ShowProfileID *string `json:"show_profile_id"`
+			SeriesID              string  `json:"series_id"`
+			Mode                  string  `json:"mode"`
+			RandomEpisodeCooldown *int    `json:"random_episode_cooldown"`
+			ShowProfileID         *string `json:"show_profile_id"`
 		} `json:"series"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -356,6 +357,10 @@ func (s *Server) handleSetPlaylistSeries(w http.ResponseWriter, r *http.Request)
 		}
 		if sr.Mode != "serial" && sr.Mode != "non_serial" {
 			writeError(w, http.StatusBadRequest, "invalid_mode", "mode must be serial or non_serial")
+			return
+		}
+		if sr.RandomEpisodeCooldown != nil && *sr.RandomEpisodeCooldown < 0 {
+			writeError(w, http.StatusBadRequest, "invalid_random_episode_cooldown", "random_episode_cooldown must be non-negative")
 			return
 		}
 		if _, exists := seriesIDs[sr.SeriesID]; exists {

@@ -112,6 +112,15 @@ season rules, which take precedence over the profile's base allow/deny mode.
 Editing a profile skips queued episodes that become excluded. Refill the
 affected playlist to replace them and republish its Plex projection.
 
+## Random Shows
+
+Set a playlist show's mode to `Random` to select episodes independently rather
+than advancing a serial cursor. The `Cooldown` control keeps each completed
+episode out of that show's selection pool for the configured number of later
+plays. Its default is 10; when a smaller eligible pool makes that impossible,
+the oldest episode is released so the queue can continue. Set it to 0 to allow
+immediate repeats.
+
 ## Clients
 
 ### Bash

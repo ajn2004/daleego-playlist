@@ -296,10 +296,10 @@ func (s *Service) importEpisodes(ctx context.Context, series *repository.Series)
 		return fmt.Errorf("no episodes returned by Plex for series %s", series.ServerSeriesID)
 	}
 
-	imported := 0
+	imported := make([]*repository.Episode, 0, len(episodes))
 	for i, ep := range episodes {
 		absOrder := i + 1
-		episode := &repository.Episode{
+		imported = append(imported, &repository.Episode{
 			ID:              uuid.New().String(),
 			SeriesID:        series.ID,
 			ServerEpisodeID: ep.ID,
@@ -310,14 +310,14 @@ func (s *Service) importEpisodes(ctx context.Context, series *repository.Series)
 			Duration:        ep.Duration,
 			Rating:          ep.Rating,
 			AirDate:         ep.AirDate,
-		}
-		if err := s.episodeRepo.Upsert(ctx, episode); err != nil {
-			return fmt.Errorf("upsert episode %q: %w", ep.Title, err)
-		}
-		imported++
+		})
 	}
 
-	if imported == 0 {
+	if err := s.episodeRepo.UpsertAll(ctx, imported); err != nil {
+		return fmt.Errorf("upsert episodes: %w", err)
+	}
+
+	if len(imported) == 0 {
 		return fmt.Errorf("no episodes imported for series %s", series.ServerSeriesID)
 	}
 
@@ -825,21 +825,22 @@ type PlaylistResponse struct {
 }
 
 type PlaylistSeriesResponse struct {
-	ID                string  `json:"id"`
-	SeriesID          string  `json:"series_id"`
-	Title             string  `json:"title"`
-	Mode              string  `json:"mode"`
-	NextPosition      *int    `json:"next_position,omitempty"`
-	NextEpisodeID     *string `json:"next_episode_id,omitempty"`
-	NextEpisodeTitle  string  `json:"next_episode_title,omitempty"`
-	NextSeasonNumber  int     `json:"next_season_number,omitempty"`
-	NextEpisodeNumber int     `json:"next_episode_number,omitempty"`
-	TotalEpisodes     int     `json:"total_episodes"`
-	WatchedEpisodes   int     `json:"watched_episodes"`
-	ProgressPct       float64 `json:"progress_pct"`
-	ShowProfileID     *string `json:"show_profile_id,omitempty"`
-	ShowProfileName   string  `json:"show_profile_name,omitempty"`
-	EligibleEpisodes  int     `json:"eligible_episodes"`
+	ID                    string  `json:"id"`
+	SeriesID              string  `json:"series_id"`
+	Title                 string  `json:"title"`
+	Mode                  string  `json:"mode"`
+	RandomEpisodeCooldown int     `json:"random_episode_cooldown"`
+	NextPosition          *int    `json:"next_position,omitempty"`
+	NextEpisodeID         *string `json:"next_episode_id,omitempty"`
+	NextEpisodeTitle      string  `json:"next_episode_title,omitempty"`
+	NextSeasonNumber      int     `json:"next_season_number,omitempty"`
+	NextEpisodeNumber     int     `json:"next_episode_number,omitempty"`
+	TotalEpisodes         int     `json:"total_episodes"`
+	WatchedEpisodes       int     `json:"watched_episodes"`
+	ProgressPct           float64 `json:"progress_pct"`
+	ShowProfileID         *string `json:"show_profile_id,omitempty"`
+	ShowProfileName       string  `json:"show_profile_name,omitempty"`
+	EligibleEpisodes      int     `json:"eligible_episodes"`
 }
 
 type PlaylistQueueResponse struct {
@@ -953,11 +954,12 @@ func (s *Service) GetPlaylist(ctx context.Context, id string) (*PlaylistResponse
 			continue
 		}
 		sr := PlaylistSeriesResponse{
-			ID:            m.ID,
-			SeriesID:      m.SeriesID,
-			Title:         ser.Title,
-			Mode:          m.Mode,
-			ShowProfileID: m.ShowProfileID,
+			ID:                    m.ID,
+			SeriesID:              m.SeriesID,
+			Title:                 ser.Title,
+			Mode:                  m.Mode,
+			RandomEpisodeCooldown: m.RandomEpisodeCooldown,
+			ShowProfileID:         m.ShowProfileID,
 		}
 		if m.ShowProfileID != nil {
 			if profile, err := s.showProfileRepo.GetByID(ctx, *m.ShowProfileID); err == nil {
@@ -1072,9 +1074,10 @@ func (s *Service) DeletePlaylist(ctx context.Context, id string) error {
 }
 
 func (s *Service) SetPlaylistSeries(ctx context.Context, playlistID string, series []struct {
-	SeriesID      string  `json:"series_id"`
-	Mode          string  `json:"mode"`
-	ShowProfileID *string `json:"show_profile_id"`
+	SeriesID              string  `json:"series_id"`
+	Mode                  string  `json:"mode"`
+	RandomEpisodeCooldown *int    `json:"random_episode_cooldown"`
+	ShowProfileID         *string `json:"show_profile_id"`
 }) error {
 	playlist, err := s.playlistRepo.GetByID(ctx, playlistID)
 	if err != nil {
@@ -1116,6 +1119,15 @@ func (s *Service) SetPlaylistSeries(ctx context.Context, playlistID string, seri
 		}
 
 		profileID := sr.ShowProfileID
+		cooldown := 10
+		if sr.RandomEpisodeCooldown != nil {
+			cooldown = *sr.RandomEpisodeCooldown
+		} else if existing, ok := currentSet[sr.SeriesID]; ok {
+			cooldown = existing.RandomEpisodeCooldown
+		}
+		if cooldown < 0 {
+			return fmt.Errorf("random episode cooldown must be non-negative")
+		}
 		if profileID != nil {
 			if _, err := s.profileForSeries(ctx, sr.SeriesID, *profileID); err != nil {
 				return err
@@ -1130,9 +1142,10 @@ func (s *Service) SetPlaylistSeries(ctx context.Context, playlistID string, seri
 			profileID = &profile.ID
 		}
 		input = append(input, repository.PlaylistSeriesInput{
-			SeriesID:      sr.SeriesID,
-			Mode:          sr.Mode,
-			ShowProfileID: profileID,
+			SeriesID:              sr.SeriesID,
+			Mode:                  sr.Mode,
+			RandomEpisodeCooldown: cooldown,
+			ShowProfileID:         profileID,
 		})
 	}
 
@@ -1358,7 +1371,8 @@ func (s *Service) getPlaylistEpisode(ctx context.Context, member repository.Play
 		return "", 0, nil
 	}
 
-	// Non-serial: find a random unplayed, unqueued episode.
+	// Non-serial: exclude only the most recently played episodes, then return
+	// them to the pool as later episodes are watched.
 	episodes, err := s.episodeRepo.ListBySeries(ctx, member.SeriesID)
 	if err != nil {
 		return "", 0, nil
@@ -1367,18 +1381,13 @@ func (s *Service) getPlaylistEpisode(ctx context.Context, member repository.Play
 		return "", 0, nil
 	}
 
-	history, err := s.playlistRepo.HistoryEpisodeIDs(ctx, member.ID)
+	cooldown := effectiveRandomEpisodeCooldown(episodes, rules, queued, member.RandomEpisodeCooldown)
+	history, err := s.playlistRepo.RecentHistoryEpisodeIDs(ctx, member.ID, cooldown)
 	if err != nil {
 		return "", 0, nil
 	}
 
-	var eligible []repository.Episode
-	for _, ep := range episodes {
-		if !rules.Allows(ep) || history[ep.ID] || queued[ep.ID] {
-			continue
-		}
-		eligible = append(eligible, ep)
-	}
+	eligible := eligibleRandomEpisodes(episodes, rules, history, queued)
 
 	if len(eligible) == 0 {
 		return "", 0, nil
@@ -1390,6 +1399,26 @@ func (s *Service) getPlaylistEpisode(ctx context.Context, member repository.Play
 	}
 	selected := eligible[n.Int64()]
 	return selected.ID, selected.Rating, nil
+}
+
+func eligibleRandomEpisodes(episodes []repository.Episode, rules ShowProfileRules, recentHistory, queued map[string]bool) []repository.Episode {
+	eligible := make([]repository.Episode, 0, len(episodes))
+	for _, ep := range episodes {
+		if rules.Allows(ep) && !recentHistory[ep.ID] && !queued[ep.ID] {
+			eligible = append(eligible, ep)
+		}
+	}
+	return eligible
+}
+
+func effectiveRandomEpisodeCooldown(episodes []repository.Episode, rules ShowProfileRules, queued map[string]bool, cooldown int) int {
+	available := 0
+	for _, ep := range episodes {
+		if rules.Allows(ep) && !queued[ep.ID] {
+			available++
+		}
+	}
+	return min(cooldown, max(available-1, 0))
 }
 
 func firstUnqueuedEpisodeAtCursor(episodes []repository.Episode, nextEpisodeID string, nextPosition *int, queued map[string]bool) (repository.Episode, bool) {

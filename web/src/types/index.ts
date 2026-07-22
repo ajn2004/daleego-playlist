@@ -113,6 +113,7 @@ export interface PlaylistSeries {
   series_id: string
   title: string
   mode: 'serial' | 'non_serial'
+  random_episode_cooldown: number
   next_position?: number | null
   next_episode_id?: string | null
   next_episode_title?: string

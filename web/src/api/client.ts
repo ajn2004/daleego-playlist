@@ -96,7 +96,7 @@ export const api = {
       }),
     delete: (id: string) =>
       request<void>(`/api/v1/playlists/${id}`, { method: 'DELETE' }),
-    setSeries: (id: string, series: { series_id: string; mode: string; show_profile_id?: string | null }[]) =>
+	setSeries: (id: string, series: { series_id: string; mode: string; random_episode_cooldown?: number; show_profile_id?: string | null }[]) =>
       request<import('../types').Playlist>(`/api/v1/playlists/${id}/series`, {
         method: 'PUT',
         body: JSON.stringify({ series }),

@@ -210,6 +210,65 @@ func (r *EpisodeRepo) Upsert(ctx context.Context, e *Episode) error {
 	return err
 }
 
+// UpsertAll atomically refreshes a series' episodes, allowing their positions
+// to change without colliding with positions from the previous import.
+func (r *EpisodeRepo) UpsertAll(ctx context.Context, episodes []*Episode) error {
+	if len(episodes) == 0 {
+		return nil
+	}
+
+	seriesID := episodes[0].SeriesID
+	for _, episode := range episodes {
+		if episode.SeriesID != seriesID {
+			return fmt.Errorf("episodes belong to different series")
+		}
+	}
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin episode refresh: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Serialize refreshes for a series before moving its positions aside.
+	if _, err := tx.Exec(ctx, `SELECT id FROM series WHERE id = $1 FOR UPDATE`, seriesID); err != nil {
+		return fmt.Errorf("lock series: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE episodes
+		SET absolute_order = absolute_order + (
+			SELECT COALESCE(MAX(absolute_order), 0) + $2 FROM episodes WHERE series_id = $1
+		)
+		WHERE series_id = $1`, seriesID, len(episodes)); err != nil {
+		return fmt.Errorf("stage episode positions: %w", err)
+	}
+
+	for _, episode := range episodes {
+		var airDate interface{} = episode.AirDate
+		if episode.AirDate == "" {
+			airDate = nil
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO episodes (id, series_id, server_episode_id, season_number, episode_number, absolute_order, title, duration_seconds, rating, originally_available_at, created_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			 ON CONFLICT (series_id, server_episode_id) DO UPDATE SET
+			   season_number = EXCLUDED.season_number,
+			   episode_number = EXCLUDED.episode_number,
+			   absolute_order = EXCLUDED.absolute_order,
+			   title = EXCLUDED.title,
+			   duration_seconds = EXCLUDED.duration_seconds,
+			   rating = EXCLUDED.rating,
+			   originally_available_at = EXCLUDED.originally_available_at`,
+			episode.ID, episode.SeriesID, episode.ServerEpisodeID, episode.SeasonNumber, episode.EpisodeNumber, episode.AbsoluteOrder, episode.Title, episode.Duration, episode.Rating, airDate, time.Now()); err != nil {
+			return fmt.Errorf("upsert episode %q: %w", episode.Title, err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit episode refresh: %w", err)
+	}
+	return nil
+}
+
 func (r *EpisodeRepo) ListBySeries(ctx context.Context, seriesID string) ([]Episode, error) {
 	rows, err := r.pool.Query(ctx, `SELECT id, series_id, server_episode_id, season_number, episode_number, absolute_order, title, duration_seconds, rating, COALESCE(originally_available_at::text, ''), created_at FROM episodes WHERE series_id = $1 ORDER BY absolute_order`, seriesID)
 	if err != nil {

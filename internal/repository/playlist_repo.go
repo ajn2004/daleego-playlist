@@ -29,12 +29,13 @@ type PlaylistSlot struct {
 }
 
 type PlaylistSeries struct {
-	ID            string    `json:"id"`
-	PlaylistID    string    `json:"playlist_id"`
-	SeriesID      string    `json:"series_id"`
-	Mode          string    `json:"mode"`
-	ShowProfileID *string   `json:"show_profile_id"`
-	CreatedAt     time.Time `json:"created_at"`
+	ID                    string    `json:"id"`
+	PlaylistID            string    `json:"playlist_id"`
+	SeriesID              string    `json:"series_id"`
+	Mode                  string    `json:"mode"`
+	RandomEpisodeCooldown int       `json:"random_episode_cooldown"`
+	ShowProfileID         *string   `json:"show_profile_id"`
+	CreatedAt             time.Time `json:"created_at"`
 }
 
 type PlaylistProgress struct {
@@ -207,9 +208,10 @@ func (r *PlaylistRepo) ListSlots(ctx context.Context, playlistID string) ([]Play
 // --- Series membership ---
 
 type PlaylistSeriesInput struct {
-	SeriesID      string
-	Mode          string
-	ShowProfileID *string
+	SeriesID              string
+	Mode                  string
+	RandomEpisodeCooldown int
+	ShowProfileID         *string
 }
 
 func (r *PlaylistRepo) SetPlaylistSeries(ctx context.Context, playlistID string, newSeries []PlaylistSeriesInput) error {
@@ -220,7 +222,7 @@ func (r *PlaylistRepo) SetPlaylistSeries(ctx context.Context, playlistID string,
 	defer tx.Rollback(ctx)
 
 	rows, err := tx.Query(ctx,
-		`SELECT id, playlist_id, series_id, mode, show_profile_id, created_at FROM playlist_series WHERE playlist_id = $1 ORDER BY created_at`, playlistID)
+		`SELECT id, playlist_id, series_id, mode, random_episode_cooldown, show_profile_id, created_at FROM playlist_series WHERE playlist_id = $1 ORDER BY created_at`, playlistID)
 	if err != nil {
 		return fmt.Errorf("list current: %w", err)
 	}
@@ -229,7 +231,7 @@ func (r *PlaylistRepo) SetPlaylistSeries(ctx context.Context, playlistID string,
 	var current []PlaylistSeries
 	for rows.Next() {
 		var member PlaylistSeries
-		if err := rows.Scan(&member.ID, &member.PlaylistID, &member.SeriesID, &member.Mode, &member.ShowProfileID, &member.CreatedAt); err != nil {
+		if err := rows.Scan(&member.ID, &member.PlaylistID, &member.SeriesID, &member.Mode, &member.RandomEpisodeCooldown, &member.ShowProfileID, &member.CreatedAt); err != nil {
 			return fmt.Errorf("scan current member: %w", err)
 		}
 		current = append(current, member)
@@ -264,8 +266,8 @@ func (r *PlaylistRepo) SetPlaylistSeries(ctx context.Context, playlistID string,
 	for _, ns := range newSeries {
 		if existing, ok := currentMap[ns.SeriesID]; ok {
 			profileChanged := !sameOptionalString(existing.ShowProfileID, ns.ShowProfileID)
-			if existing.Mode != ns.Mode || profileChanged {
-				if _, err := tx.Exec(ctx, `UPDATE playlist_series SET mode = $1, show_profile_id = $2 WHERE id = $3`, ns.Mode, ns.ShowProfileID, existing.ID); err != nil {
+			if existing.Mode != ns.Mode || existing.RandomEpisodeCooldown != ns.RandomEpisodeCooldown || profileChanged {
+				if _, err := tx.Exec(ctx, `UPDATE playlist_series SET mode = $1, random_episode_cooldown = $2, show_profile_id = $3 WHERE id = $4`, ns.Mode, ns.RandomEpisodeCooldown, ns.ShowProfileID, existing.ID); err != nil {
 					return fmt.Errorf("update playlist series: %w", err)
 				}
 				// Preserve a currently watched episode, but replace queue entries whose
@@ -278,8 +280,8 @@ func (r *PlaylistRepo) SetPlaylistSeries(ctx context.Context, playlistID string,
 			}
 		} else {
 			if _, err := tx.Exec(ctx,
-				`INSERT INTO playlist_series (id, playlist_id, series_id, mode, show_profile_id, created_at) VALUES (gen_random_uuid(), $1, $2, $3, $4, now())`,
-				playlistID, ns.SeriesID, ns.Mode, ns.ShowProfileID); err != nil {
+				`INSERT INTO playlist_series (id, playlist_id, series_id, mode, random_episode_cooldown, show_profile_id, created_at) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, now())`,
+				playlistID, ns.SeriesID, ns.Mode, ns.RandomEpisodeCooldown, ns.ShowProfileID); err != nil {
 				return fmt.Errorf("insert member: %w", err)
 			}
 		}
@@ -290,7 +292,7 @@ func (r *PlaylistRepo) SetPlaylistSeries(ctx context.Context, playlistID string,
 
 func (r *PlaylistRepo) ListSeries(ctx context.Context, playlistID string) ([]PlaylistSeries, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, playlist_id, series_id, mode, show_profile_id, created_at FROM playlist_series WHERE playlist_id = $1 ORDER BY created_at`, playlistID)
+		`SELECT id, playlist_id, series_id, mode, random_episode_cooldown, show_profile_id, created_at FROM playlist_series WHERE playlist_id = $1 ORDER BY created_at`, playlistID)
 	if err != nil {
 		return nil, fmt.Errorf("list playlist series: %w", err)
 	}
@@ -299,7 +301,7 @@ func (r *PlaylistRepo) ListSeries(ctx context.Context, playlistID string) ([]Pla
 	var series []PlaylistSeries
 	for rows.Next() {
 		var ps PlaylistSeries
-		if err := rows.Scan(&ps.ID, &ps.PlaylistID, &ps.SeriesID, &ps.Mode, &ps.ShowProfileID, &ps.CreatedAt); err != nil {
+		if err := rows.Scan(&ps.ID, &ps.PlaylistID, &ps.SeriesID, &ps.Mode, &ps.RandomEpisodeCooldown, &ps.ShowProfileID, &ps.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan playlist series: %w", err)
 		}
 		series = append(series, ps)
@@ -309,9 +311,9 @@ func (r *PlaylistRepo) ListSeries(ctx context.Context, playlistID string) ([]Pla
 
 func (r *PlaylistRepo) GetPlaylistSeriesByID(ctx context.Context, id string) (*PlaylistSeries, error) {
 	row := r.pool.QueryRow(ctx,
-		`SELECT id, playlist_id, series_id, mode, show_profile_id, created_at FROM playlist_series WHERE id = $1`, id)
+		`SELECT id, playlist_id, series_id, mode, random_episode_cooldown, show_profile_id, created_at FROM playlist_series WHERE id = $1`, id)
 	var ps PlaylistSeries
-	if err := row.Scan(&ps.ID, &ps.PlaylistID, &ps.SeriesID, &ps.Mode, &ps.ShowProfileID, &ps.CreatedAt); err != nil {
+	if err := row.Scan(&ps.ID, &ps.PlaylistID, &ps.SeriesID, &ps.Mode, &ps.RandomEpisodeCooldown, &ps.ShowProfileID, &ps.CreatedAt); err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, fmt.Errorf("playlist series not found")
 		}
@@ -373,8 +375,7 @@ func (r *PlaylistRepo) AdvanceProgress(ctx context.Context, playlistSeriesID str
 func (r *PlaylistRepo) AddHistory(ctx context.Context, playlistSeriesID, episodeID string) error {
 	_, err := r.pool.Exec(ctx,
 		`INSERT INTO playlist_series_history (id, playlist_series_id, episode_id, played_at)
-		 VALUES (gen_random_uuid(), $1, $2, now())
-		 ON CONFLICT DO NOTHING`,
+		 VALUES (gen_random_uuid(), $1, $2, now())`,
 		playlistSeriesID, episodeID)
 	return err
 }
@@ -416,6 +417,32 @@ func (r *PlaylistRepo) HistoryEpisodeIDs(ctx context.Context, playlistSeriesID s
 		ids[id] = true
 	}
 	return ids, nil
+}
+
+// RecentHistoryEpisodeIDs returns episodes played within the member's cooldown window.
+func (r *PlaylistRepo) RecentHistoryEpisodeIDs(ctx context.Context, playlistSeriesID string, limit int) (map[string]bool, error) {
+	if limit <= 0 {
+		return map[string]bool{}, nil
+	}
+	rows, err := r.pool.Query(ctx,
+		`SELECT episode_id FROM playlist_series_history
+		 WHERE playlist_series_id = $1
+		 ORDER BY played_at DESC, id DESC
+		 LIMIT $2`, playlistSeriesID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list recent history: %w", err)
+	}
+	defer rows.Close()
+
+	ids := make(map[string]bool)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan recent history: %w", err)
+		}
+		ids[id] = true
+	}
+	return ids, rows.Err()
 }
 
 // --- Queue items ---
