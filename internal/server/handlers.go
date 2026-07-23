@@ -394,8 +394,8 @@ func (s *Server) handleSetPlaylistSlots(w http.ResponseWriter, r *http.Request) 
 	}
 	slotTypes := make([]string, len(req.Slots))
 	for i, s := range req.Slots {
-		if s.SlotType != "top_rated" && s.SlotType != "any" && s.SlotType != "lowest_rated" {
-			writeError(w, http.StatusBadRequest, "invalid_slot_type", "slot_type must be top_rated, any, or lowest_rated")
+		if s.SlotType != "top_rated" && s.SlotType != "any" && s.SlotType != "lowest_rated" && s.SlotType != "least_recently_seen" {
+			writeError(w, http.StatusBadRequest, "invalid_slot_type", "slot_type must be top_rated, any, lowest_rated, or least_recently_seen")
 			return
 		}
 		slotTypes[i] = s.SlotType

@@ -2,6 +2,7 @@ package service
 
 import (
 	"testing"
+	"time"
 
 	"github.com/andrew/rotator/internal/repository"
 )
@@ -90,6 +91,35 @@ func TestSelectFillCandidateAnyModulo(t *testing.T) {
 	}
 }
 
+func TestSelectFillCandidateLeastRecentlySeenPrioritizesNeverSeen(t *testing.T) {
+	older := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	newer := older.Add(24 * time.Hour)
+	candidates := []fillCandidate{
+		{seriesID: "recent", episodeID: "e1", lastSeenAt: &newer},
+		{seriesID: "never", episodeID: "e2"},
+		{seriesID: "older", episodeID: "e3", lastSeenAt: &older},
+	}
+
+	result, ok := selectFillCandidate(candidates, "least_recently_seen", 0, len(candidates))
+	if !ok || result.episodeID != "e2" {
+		t.Fatalf("expected never-seen candidate, got %#v", result)
+	}
+}
+
+func TestSelectFillCandidateLeastRecentlySeenUsesOldestTimestamp(t *testing.T) {
+	older := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	newer := older.Add(24 * time.Hour)
+	candidates := []fillCandidate{
+		{seriesID: "recent", episodeID: "e1", lastSeenAt: &newer},
+		{seriesID: "older", episodeID: "e2", lastSeenAt: &older},
+	}
+
+	result, ok := selectFillCandidate(candidates, "least_recently_seen", 0, len(candidates))
+	if !ok || result.episodeID != "e2" {
+		t.Fatalf("expected oldest candidate, got %#v", result)
+	}
+}
+
 func TestSelectFillCandidateTopRatedExcludesLowerHalf(t *testing.T) {
 	candidates := []fillCandidate{
 		{seriesID: "s1", episodeID: "e1", rating: 10.0},
@@ -168,5 +198,22 @@ func TestEffectiveRandomEpisodeCooldownLeavesAnEpisodeAvailable(t *testing.T) {
 	episodes := []repository.Episode{{ID: "e1"}, {ID: "e2"}, {ID: "e3"}}
 	if got := effectiveRandomEpisodeCooldown(episodes, ShowProfileRules{DefaultAllow: true}, map[string]bool{"e3": true}, 10); got != 1 {
 		t.Fatalf("expected cooldown to be capped at one available episode, got %d", got)
+	}
+}
+
+func TestRemainingDurationStartsAtCursorAndRespectsProfile(t *testing.T) {
+	episodes := []repository.Episode{
+		{ID: "e1", AbsoluteOrder: 1, Duration: 1200},
+		{ID: "e2", AbsoluteOrder: 2, Duration: 1500},
+		{ID: "e3", AbsoluteOrder: 3, Duration: 1800},
+	}
+	rules := ShowProfileRules{
+		DefaultAllow: true,
+		Episodes:     map[string]bool{"e3": false},
+	}
+
+	got := remainingDuration(episodes, 2, rules)
+	if got != 1500 {
+		t.Fatalf("remaining duration = %d, want 1500", got)
 	}
 }

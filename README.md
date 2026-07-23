@@ -101,6 +101,10 @@ make spike
 - `GET|PUT|DELETE /api/v1/series/{id}/show-profiles/{profileID}` - Manage a show profile
 - `POST /api/v1/series/{id}/show-profiles/{profileID}/default` - Set the default for new playlist memberships
 
+Playlist detail responses include `remaining_serial_duration_seconds`: the total
+duration of eligible episodes at or after each serial show's current cursor.
+Random-mode shows and completed serial shows are excluded.
+
 ## Show Profiles
 
 Each series receives an allow-all `Default` profile. A playlist membership uses
@@ -120,6 +124,13 @@ episode out of that show's selection pool for the configured number of later
 plays. Its default is 10; when a smaller eligible pool makes that impossible,
 the oldest episode is released so the queue can continue. Set it to 0 to allow
 immediate repeats.
+
+## Regular Show Rotation
+
+Use a `Least Recently Seen` playlist slot to favor the show that has gone the
+longest without a confirmed watched episode. New shows, which have never been
+seen in that playlist, are selected first. Last-seen state is tracked per
+playlist membership and updates when Plex reports an episode watched.
 
 ## Clients
 

@@ -801,46 +801,49 @@ func (s *Service) buildCandidates(ctx context.Context) ([]rotation.Candidate, er
 // --- Playlists ---
 
 type fillCandidate struct {
-	seriesID  string
-	psID      string
-	mode      string
-	episodeID string
-	rating    float64
+	seriesID   string
+	psID       string
+	mode       string
+	episodeID  string
+	rating     float64
+	lastSeenAt *time.Time
 }
 
 type PlaylistResponse struct {
-	ID               string                    `json:"id"`
-	MediaServerID    string                    `json:"media_server_id"`
-	Name             string                    `json:"name"`
-	PlexPlaylistName string                    `json:"plex_playlist_name"`
-	QueueTargetCount int                       `json:"queue_target_count"`
-	CycleCursor      int                       `json:"cycle_cursor"`
-	Enabled          bool                      `json:"enabled"`
-	CreatedAt        time.Time                 `json:"created_at"`
-	UpdatedAt        time.Time                 `json:"updated_at"`
-	Series           []PlaylistSeriesResponse  `json:"series,omitempty"`
-	Slots            []repository.PlaylistSlot `json:"slots,omitempty"`
-	QueueItems       []PlaylistQueueResponse   `json:"queue_items,omitempty"`
-	QueuePending     int                       `json:"queue_pending_count"`
+	ID                             string                    `json:"id"`
+	MediaServerID                  string                    `json:"media_server_id"`
+	Name                           string                    `json:"name"`
+	PlexPlaylistName               string                    `json:"plex_playlist_name"`
+	QueueTargetCount               int                       `json:"queue_target_count"`
+	CycleCursor                    int                       `json:"cycle_cursor"`
+	Enabled                        bool                      `json:"enabled"`
+	CreatedAt                      time.Time                 `json:"created_at"`
+	UpdatedAt                      time.Time                 `json:"updated_at"`
+	Series                         []PlaylistSeriesResponse  `json:"series,omitempty"`
+	Slots                          []repository.PlaylistSlot `json:"slots,omitempty"`
+	QueueItems                     []PlaylistQueueResponse   `json:"queue_items,omitempty"`
+	QueuePending                   int                       `json:"queue_pending_count"`
+	RemainingSerialDurationSeconds int                       `json:"remaining_serial_duration_seconds"`
 }
 
 type PlaylistSeriesResponse struct {
-	ID                    string  `json:"id"`
-	SeriesID              string  `json:"series_id"`
-	Title                 string  `json:"title"`
-	Mode                  string  `json:"mode"`
-	RandomEpisodeCooldown int     `json:"random_episode_cooldown"`
-	NextPosition          *int    `json:"next_position,omitempty"`
-	NextEpisodeID         *string `json:"next_episode_id,omitempty"`
-	NextEpisodeTitle      string  `json:"next_episode_title,omitempty"`
-	NextSeasonNumber      int     `json:"next_season_number,omitempty"`
-	NextEpisodeNumber     int     `json:"next_episode_number,omitempty"`
-	TotalEpisodes         int     `json:"total_episodes"`
-	WatchedEpisodes       int     `json:"watched_episodes"`
-	ProgressPct           float64 `json:"progress_pct"`
-	ShowProfileID         *string `json:"show_profile_id,omitempty"`
-	ShowProfileName       string  `json:"show_profile_name,omitempty"`
-	EligibleEpisodes      int     `json:"eligible_episodes"`
+	ID                    string     `json:"id"`
+	SeriesID              string     `json:"series_id"`
+	Title                 string     `json:"title"`
+	Mode                  string     `json:"mode"`
+	RandomEpisodeCooldown int        `json:"random_episode_cooldown"`
+	NextPosition          *int       `json:"next_position,omitempty"`
+	NextEpisodeID         *string    `json:"next_episode_id,omitempty"`
+	NextEpisodeTitle      string     `json:"next_episode_title,omitempty"`
+	NextSeasonNumber      int        `json:"next_season_number,omitempty"`
+	NextEpisodeNumber     int        `json:"next_episode_number,omitempty"`
+	TotalEpisodes         int        `json:"total_episodes"`
+	WatchedEpisodes       int        `json:"watched_episodes"`
+	ProgressPct           float64    `json:"progress_pct"`
+	ShowProfileID         *string    `json:"show_profile_id,omitempty"`
+	ShowProfileName       string     `json:"show_profile_name,omitempty"`
+	EligibleEpisodes      int        `json:"eligible_episodes"`
+	LastSeenAt            *time.Time `json:"last_seen_at,omitempty"`
 }
 
 type PlaylistQueueResponse struct {
@@ -948,6 +951,7 @@ func (s *Service) GetPlaylist(ctx context.Context, id string) (*PlaylistResponse
 	pending, _ := s.playlistRepo.CountPendingQueueItems(ctx, id)
 
 	seriesResp := make([]PlaylistSeriesResponse, 0, len(members))
+	remainingSerialDuration := 0
 	for _, m := range members {
 		ser, err := s.seriesRepo.GetByID(ctx, m.SeriesID)
 		if err != nil {
@@ -960,6 +964,7 @@ func (s *Service) GetPlaylist(ctx context.Context, id string) (*PlaylistResponse
 			Mode:                  m.Mode,
 			RandomEpisodeCooldown: m.RandomEpisodeCooldown,
 			ShowProfileID:         m.ShowProfileID,
+			LastSeenAt:            m.LastSeenAt,
 		}
 		if m.ShowProfileID != nil {
 			if profile, err := s.showProfileRepo.GetByID(ctx, *m.ShowProfileID); err == nil {
@@ -969,10 +974,10 @@ func (s *Service) GetPlaylist(ctx context.Context, id string) (*PlaylistResponse
 
 		total, _ := s.episodeRepo.CountBySeries(ctx, m.SeriesID)
 		sr.TotalEpisodes = total
-		if episodes, err := s.episodeRepo.ListBySeries(ctx, m.SeriesID); err == nil {
-			if rules, err := s.profileRules(ctx, m.ShowProfileID); err == nil {
-				sr.EligibleEpisodes = len(filterAllowedEpisodes(episodes, rules))
-			}
+		episodes, episodesErr := s.episodeRepo.ListBySeries(ctx, m.SeriesID)
+		rules, rulesErr := s.profileRules(ctx, m.ShowProfileID)
+		if episodesErr == nil && rulesErr == nil {
+			sr.EligibleEpisodes = len(filterAllowedEpisodes(episodes, rules))
 		}
 
 		if m.Mode == "serial" {
@@ -994,6 +999,13 @@ func (s *Service) GetPlaylist(ctx context.Context, id string) (*PlaylistResponse
 				} else if progress.LastWatchedEpisodeID != nil {
 					sr.WatchedEpisodes = total
 				}
+			}
+			if episodesErr == nil && rulesErr == nil && (progress == nil || progress.NextPosition != nil) {
+				var nextPosition int
+				if progress != nil {
+					nextPosition = *progress.NextPosition
+				}
+				remainingSerialDuration += remainingDuration(episodes, nextPosition, rules)
 			}
 		} else {
 			historyCount, _ := s.playlistRepo.GetHistoryCount(ctx, m.ID)
@@ -1041,20 +1053,31 @@ func (s *Service) GetPlaylist(ctx context.Context, id string) (*PlaylistResponse
 	}
 
 	return &PlaylistResponse{
-		ID:               p.ID,
-		MediaServerID:    p.MediaServerID,
-		Name:             p.Name,
-		PlexPlaylistName: p.PlexPlaylistName,
-		QueueTargetCount: p.QueueTargetCount,
-		CycleCursor:      p.CycleCursor,
-		Enabled:          p.Enabled,
-		CreatedAt:        p.CreatedAt,
-		UpdatedAt:        p.UpdatedAt,
-		Series:           seriesResp,
-		Slots:            slots,
-		QueueItems:       queueResp,
-		QueuePending:     pending,
+		ID:                             p.ID,
+		MediaServerID:                  p.MediaServerID,
+		Name:                           p.Name,
+		PlexPlaylistName:               p.PlexPlaylistName,
+		QueueTargetCount:               p.QueueTargetCount,
+		CycleCursor:                    p.CycleCursor,
+		Enabled:                        p.Enabled,
+		CreatedAt:                      p.CreatedAt,
+		UpdatedAt:                      p.UpdatedAt,
+		Series:                         seriesResp,
+		Slots:                          slots,
+		QueueItems:                     queueResp,
+		QueuePending:                   pending,
+		RemainingSerialDurationSeconds: remainingSerialDuration,
 	}, nil
+}
+
+func remainingDuration(episodes []repository.Episode, nextPosition int, rules ShowProfileRules) int {
+	total := 0
+	for _, episode := range episodes {
+		if episode.AbsoluteOrder >= nextPosition && rules.Allows(episode) {
+			total += episode.Duration
+		}
+	}
+	return total
 }
 
 func (s *Service) UpdatePlaylist(ctx context.Context, id, name, plexName string, targetCount int, enabled bool) error {
@@ -1274,11 +1297,12 @@ func (s *Service) FillPlaylist(ctx context.Context, playlistID string) (int, err
 				}
 
 				candidates = append(candidates, fillCandidate{
-					seriesID:  m.SeriesID,
-					psID:      m.ID,
-					mode:      m.Mode,
-					episodeID: episodeID,
-					rating:    rating,
+					seriesID:   m.SeriesID,
+					psID:       m.ID,
+					mode:       m.Mode,
+					episodeID:  episodeID,
+					rating:     rating,
+					lastSeenAt: m.LastSeenAt,
 				})
 			}
 		}
@@ -1603,6 +1627,17 @@ func selectFillCandidate(candidates []fillCandidate, slotType string, position, 
 	})
 
 	switch slotType {
+	case "least_recently_seen":
+		sort.Slice(pool, func(i, j int) bool {
+			if pool[i].lastSeenAt == nil || pool[j].lastSeenAt == nil {
+				return pool[i].lastSeenAt == nil && pool[j].lastSeenAt != nil
+			}
+			if !pool[i].lastSeenAt.Equal(*pool[j].lastSeenAt) {
+				return pool[i].lastSeenAt.Before(*pool[j].lastSeenAt)
+			}
+			return pool[i].seriesID < pool[j].seriesID
+		})
+		return pool[0], true
 	case "top_rated":
 		topPoolSize := seriesCount/2 + 1
 		pool = ratedFillCandidates(pool)
@@ -1902,6 +1937,9 @@ func (s *Service) SyncPlaylist(ctx context.Context, playlistID string) (int, int
 			if err := s.advancePlaylistCursor(ctx, *item.PlaylistSeriesID, item.EpisodeID); err != nil {
 				slog.Warn("advance playlist cursor failed", "item_id", item.ID, "error", err)
 			}
+			if err := s.playlistRepo.MarkSeriesSeen(ctx, *item.PlaylistSeriesID); err != nil {
+				slog.Warn("mark playlist series seen failed", "item_id", item.ID, "error", err)
+			}
 		} else {
 			// Non-serial: add to history
 			psID, err := s.findPlaylistSeriesID(ctx, p.ID, item.SeriesID)
@@ -1912,6 +1950,9 @@ func (s *Service) SyncPlaylist(ctx context.Context, playlistID string) (int, int
 			if err := s.playlistRepo.AddHistory(ctx, psID, item.EpisodeID); err != nil {
 				slog.Warn("add history failed", "error", err)
 				continue
+			}
+			if err := s.playlistRepo.MarkSeriesSeen(ctx, psID); err != nil {
+				slog.Warn("mark playlist series seen failed", "item_id", item.ID, "error", err)
 			}
 		}
 

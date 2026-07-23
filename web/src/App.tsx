@@ -588,7 +588,7 @@ function PlaylistEditor({
         <div>
           <p className="eyebrow">PLAYLIST WORKSPACE</p>
           <h2>{detail.name}</h2>
-          <p className="overview-meta">{detail.queue_pending_count} episodes ready <span>·</span> target {detail.queue_target_count} <span>·</span> {enabled ? 'live' : 'paused'}</p>
+          <p className="overview-meta">{detail.queue_pending_count} episodes ready <span>·</span> {formatDuration(detail.remaining_serial_duration_seconds)} remaining in serial shows <span>·</span> target {detail.queue_target_count} <span>·</span> {enabled ? 'live' : 'paused'}</p>
         </div>
         <div className="playlist-actions">
           <button onClick={fill} disabled={filling} className="button primary">{filling ? 'Filling...' : 'Fill queue'}</button>
@@ -702,7 +702,7 @@ function PlaylistEditor({
                         <span style={{ color: '#666' }}>Random episode order</span>
                       )
                     )}
-                    <span className="series-progress-copy">{watchedEpisodes}/{ps.total_episodes} watched · {Math.max(ps.total_episodes - watchedEpisodes, 0)} left</span>
+                    <span className="series-progress-copy">{watchedEpisodes}/{ps.total_episodes} watched · {Math.max(ps.total_episodes - watchedEpisodes, 0)} left · {ps.last_seen_at ? `Last seen ${new Date(ps.last_seen_at).toLocaleDateString()}` : 'Never seen'}</span>
                   </div>
                 </div>
                 <div className="series-card-actions">
@@ -832,6 +832,7 @@ function PlaylistEditor({
               <option value="top_rated">Top Rated (Random)</option>
               <option value="any">Any Episode</option>
               <option value="lowest_rated">Lowest Rated</option>
+              <option value="least_recently_seen">Least Recently Seen</option>
             </select>
             <button onClick={() => removeSlot(i)} style={{ ...smallBtn, color: '#c00' }}>x</button>
           </div>
@@ -966,4 +967,18 @@ const smallBtn: React.CSSProperties = {
   border: '1px solid #ccc',
   background: '#f8f8f8',
   fontSize: '0.85rem',
+}
+
+function formatDuration(seconds: number) {
+  const totalMinutes = Math.floor(seconds / 60)
+  const days = Math.floor(totalMinutes / (24 * 60))
+  const hours = Math.floor(totalMinutes % (24 * 60) / 60)
+  const minutes = totalMinutes % 60
+  const parts: string[] = []
+
+  if (days > 0) parts.push(`${days}d`)
+  if (hours > 0) parts.push(`${hours}h`)
+  if (minutes > 0 || parts.length === 0) parts.push(`${minutes}m`)
+
+  return parts.join(' ')
 }

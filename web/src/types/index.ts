@@ -106,6 +106,7 @@ export interface Playlist {
   slots?: PlaylistSlot[]
   queue_items?: PlaylistQueueItem[]
   queue_pending_count: number
+	remaining_serial_duration_seconds: number
 }
 
 export interface PlaylistSeries {
@@ -125,6 +126,7 @@ export interface PlaylistSeries {
   show_profile_id?: string | null
   show_profile_name?: string
   eligible_episodes: number
+  last_seen_at?: string | null
 }
 
 export interface ShowProfileRule {
@@ -155,7 +157,7 @@ export interface PlaylistSlot {
   id: string
   playlist_id: string
   position: number
-  slot_type: 'top_rated' | 'any' | 'lowest_rated'
+  slot_type: 'top_rated' | 'any' | 'lowest_rated' | 'least_recently_seen'
 }
 
 export interface PlaylistQueueItem {
