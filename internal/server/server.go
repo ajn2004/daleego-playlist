@@ -10,24 +10,28 @@ import (
 
 	"github.com/andrew/rotator/db/migrations"
 	"github.com/andrew/rotator/internal/config"
+	"github.com/andrew/rotator/internal/discovery"
 	"github.com/andrew/rotator/internal/media/plex"
 	"github.com/andrew/rotator/internal/repository"
 	"github.com/andrew/rotator/internal/rotation"
 	"github.com/andrew/rotator/internal/service"
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
 )
 
 type Server struct {
-	cfg        *config.Config
-	pool       *pgxpool.Pool
-	plexClient *plex.Client
-	router     http.Handler
-	repos      *repository.Queries
-	svc        *service.Service
+	cfg           *config.Config
+	pool          *pgxpool.Pool
+	plexClient    *plex.Client
+	router        http.Handler
+	repos         *repository.Queries
+	svc           *service.Service
+	discovery     *discovery.Service
+	discoveryRepo *repository.DiscoveryRepo
 }
 
 func New(ctx context.Context, cfg *config.Config) (*Server, error) {
@@ -50,6 +54,7 @@ func New(ctx context.Context, cfg *config.Config) (*Server, error) {
 	serverRepo := repository.NewServerRepo(pool)
 	queueBindingRepo := repository.NewQueueBindingRepo(pool)
 	showProfileRepo := repository.NewShowProfileRepo(pool)
+	discoveryRepo := repository.NewDiscoveryRepo(pool)
 
 	svc := service.New(
 		cfg.PlexPlaylistName,
@@ -68,16 +73,28 @@ func New(ctx context.Context, cfg *config.Config) (*Server, error) {
 	)
 
 	s := &Server{
-		cfg:        cfg,
-		pool:       pool,
-		plexClient: plexClient,
-		repos:      repos,
-		svc:        svc,
+		cfg:           cfg,
+		pool:          pool,
+		plexClient:    plexClient,
+		repos:         repos,
+		svc:           svc,
+		discoveryRepo: discoveryRepo,
 	}
+	s.discovery = discovery.New(
+		discovery.SourceFunc(func(ctx context.Context, cursor string) (discovery.Response, error) {
+			return discoverPlexShows(ctx, plexClient, serverRepo, cursor)
+		}),
+		discovery.CatalogFunc(func(ctx context.Context, show discovery.Show) (bool, error) {
+			return seriesRepo.UpsertDiscovered(ctx, &repository.Series{ID: uuid.New().String(), MediaServerID: show.ServerID, ServerSeriesID: show.ServerShowID, LibraryID: show.LibraryID, Title: show.Title})
+		}), discoveryRepo, slog.Default())
 
 	s.router = s.buildRouter()
 
 	return s, nil
+}
+
+func (s *Server) discoveryStatus(ctx context.Context) (any, error) {
+	return s.discoveryRepo.Status(ctx)
 }
 
 func (s *Server) buildRouter() http.Handler {
@@ -189,6 +206,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 	// Run sync loop
 	go func() {
+		go s.discovery.Run(ctx, s.cfg.ShowDiscoveryInterval)
 		if err := s.svc.SyncEnabledPlaylists(ctx); err != nil {
 			slog.Warn("initial playlist sync failed", "error", err)
 		}
@@ -226,6 +244,35 @@ func (s *Server) Run(ctx context.Context) error {
 	case err := <-errCh:
 		return err
 	}
+}
+
+func discoverPlexShows(ctx context.Context, client *plex.Client, servers *repository.ServerRepo, cursor string) (discovery.Response, error) {
+	all, err := servers.List(ctx)
+	if err != nil {
+		return discovery.Response{}, err
+	}
+	if len(all) == 0 {
+		return discovery.Response{NextCursor: cursor}, nil
+	}
+	server := all[0]
+	libraries, err := client.ListLibraries(ctx)
+	if err != nil {
+		return discovery.Response{}, err
+	}
+	shows := make([]discovery.Show, 0)
+	for _, library := range libraries {
+		if library.Type != "show" {
+			continue
+		}
+		items, err := client.ListSeries(ctx, library.ID)
+		if err != nil {
+			return discovery.Response{}, err
+		}
+		for _, item := range items {
+			shows = append(shows, discovery.Show{ServerID: server.ID, ServerShowID: item.ID, LibraryID: library.ID, Title: item.Title})
+		}
+	}
+	return discovery.Response{Shows: shows, NextCursor: time.Now().UTC().Format(time.RFC3339Nano)}, nil
 }
 
 func (s *Server) Migrate(ctx context.Context) error {

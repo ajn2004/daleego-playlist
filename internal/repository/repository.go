@@ -113,6 +113,16 @@ func (r *SeriesRepo) Upsert(ctx context.Context, s *Series) error {
 	return err
 }
 
+func (r *SeriesRepo) UpsertDiscovered(ctx context.Context, s *Series) (bool, error) {
+	var inserted bool
+	err := r.pool.QueryRow(ctx, `
+		INSERT INTO series (id, media_server_id, server_series_id, library_id, title, active, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, false, now(), now())
+		ON CONFLICT (media_server_id, server_series_id) DO UPDATE SET title = EXCLUDED.title, library_id = EXCLUDED.library_id, updated_at = now()
+		RETURNING (xmax = 0)`, s.ID, s.MediaServerID, s.ServerSeriesID, s.LibraryID, s.Title).Scan(&inserted)
+	return inserted, err
+}
+
 func (r *SeriesRepo) List(ctx context.Context) ([]Series, error) {
 	rows, err := r.pool.Query(ctx, `SELECT id, media_server_id, server_series_id, library_id, title, active, created_at, updated_at FROM series ORDER BY title`)
 	if err != nil {

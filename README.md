@@ -96,6 +96,12 @@ make spike
 - `POST /api/v1/playlists/{id}/sync` - Detect playback progress, advance completed serial cursors, and refill the queue
 - `GET /api/v1/playlists/{id}/plex-items` - Read the current Plex playlist order
 - `PUT /api/v1/playlists/{id}/plex-items` - Replace the Plex playlist with ordered episode IDs
+
+The server performs an immediate show discovery poll at startup and repeats it
+every 600 seconds by default. Configure the interval with
+`SHOW_DISCOVERY_INTERVAL_SECONDS`. Discovery state and its cursor are stored in
+PostgreSQL; failed polls leave the cursor unchanged and are reported by
+`GET /api/v1/status` under `show_discovery`.
 - `GET /api/v1/series/{id}/show-profiles` - List reusable episode filters for a show
 - `POST /api/v1/series/{id}/show-profiles` - Create a show profile
 - `GET|PUT|DELETE /api/v1/series/{id}/show-profiles/{profileID}` - Manage a show profile

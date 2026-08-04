@@ -8,13 +8,14 @@ import (
 )
 
 type Config struct {
-	DatabaseURL      string
-	HTTPAddr         string
-	PlexURL          string
-	PlexToken        string
-	PlexPlaylistName string
-	LogLevel         string
-	SyncInterval     time.Duration
+	DatabaseURL           string
+	HTTPAddr              string
+	PlexURL               string
+	PlexToken             string
+	PlexPlaylistName      string
+	LogLevel              string
+	SyncInterval          time.Duration
+	ShowDiscoveryInterval time.Duration
 }
 
 func Load() (*Config, error) {
@@ -28,15 +29,17 @@ func Load() (*Config, error) {
 	plexPlaylistName := envDefault("PLEX_PLAYLIST_NAME", "TV Rotation")
 	logLevel := envDefault("LOG_LEVEL", "info")
 	syncInterval := envDefaultDuration("SYNC_INTERVAL", 60*time.Second)
+	discoveryInterval := envDefaultDuration("SHOW_DISCOVERY_INTERVAL_SECONDS", 600*time.Second)
 
 	return &Config{
-		DatabaseURL:      dbURL,
-		HTTPAddr:         httpAddr,
-		PlexURL:          plexURL,
-		PlexToken:        plexToken,
-		PlexPlaylistName: plexPlaylistName,
-		LogLevel:         logLevel,
-		SyncInterval:     syncInterval,
+		DatabaseURL:           dbURL,
+		HTTPAddr:              httpAddr,
+		PlexURL:               plexURL,
+		PlexToken:             plexToken,
+		PlexPlaylistName:      plexPlaylistName,
+		LogLevel:              logLevel,
+		SyncInterval:          syncInterval,
+		ShowDiscoveryInterval: discoveryInterval,
 	}, nil
 }
 

@@ -24,9 +24,15 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{
-		"status": "ok",
-		"plex":   s.cfg.PlexURL,
+	discoveryState, err := s.discoveryStatus(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "status_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":         "ok",
+		"plex":           s.cfg.PlexURL,
+		"show_discovery": discoveryState,
 	})
 }
 
