@@ -199,11 +199,14 @@ func TestGetEpisodeProgress(t *testing.T) {
 		t.Fatalf("expected 1 progress, got %d", len(progress))
 	}
 
-	if !progress[0].Viewed {
-		t.Error("expected episode to be viewed")
+	if progress[0].Viewed {
+		t.Error("Plex client should not infer a queue-specific viewed event")
 	}
 	if progress[0].ViewCount != 1 {
 		t.Errorf("expected view count 1, got %d", progress[0].ViewCount)
+	}
+	if progress[0].LastViewedAt != 1700000000 {
+		t.Errorf("expected last viewed timestamp 1700000000, got %d", progress[0].LastViewedAt)
 	}
 }
 

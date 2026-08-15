@@ -4,8 +4,25 @@ import (
 	"testing"
 	"time"
 
+	"github.com/andrew/rotator/internal/media"
 	"github.com/andrew/rotator/internal/repository"
 )
+
+func TestNewlyViewedAfterIgnoresHistoricalPlexView(t *testing.T) {
+	queuedAt := time.Unix(1700000100, 0)
+	progress := media.EpisodeProgress{
+		ViewCount:    3,
+		LastViewedAt: 1700000000,
+	}
+
+	if newlyViewedAfter(progress, queuedAt) {
+		t.Fatal("historical Plex view must not complete a newly queued item")
+	}
+	progress.LastViewedAt = 1700000101
+	if !newlyViewedAfter(progress, queuedAt) {
+		t.Fatal("view after queue creation should complete the queue item")
+	}
+}
 
 func TestSelectFillCandidateEmpty(t *testing.T) {
 	result, ok := selectFillCandidate(nil, "any", 0, 0)

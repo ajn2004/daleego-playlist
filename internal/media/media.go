@@ -30,11 +30,12 @@ type EpisodeMetadata struct {
 }
 
 type EpisodeProgress struct {
-	EpisodeID  string
-	Viewed     bool
-	Watching   bool
-	ViewCount  int
-	ViewOffset int
+	EpisodeID    string
+	Viewed       bool
+	Watching     bool
+	ViewCount    int
+	ViewOffset   int
+	LastViewedAt int64
 }
 
 type Playlist struct {

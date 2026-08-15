@@ -57,6 +57,9 @@ tools:
 spike:
 	$(GO) run ./cmd/plex-spike/
 
+sync:
+	go run ./cmd/rotatorctl/ sync 2>&1 | grep -F "sync complete"
+
 # Help
 help:
 	@echo "Usage:"
@@ -71,3 +74,4 @@ help:
 	@echo "  make compose-up      Start all services"
 	@echo "  make compose-down    Stop all services"
 	@echo "  make spike           Run Plex connectivity spike"
+	@echo "  make sync            Synchronize DB with plex"

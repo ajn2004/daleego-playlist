@@ -375,13 +375,12 @@ func (c *Client) GetEpisodeProgress(ctx context.Context, episodeIDs []string) ([
 
 		for _, v := range container.Video {
 			progress := media.EpisodeProgress{
-				EpisodeID:  v.RatingKey,
-				ViewCount:  v.ViewCount,
-				ViewOffset: v.ViewOffset,
+				EpisodeID:    v.RatingKey,
+				ViewCount:    v.ViewCount,
+				ViewOffset:   v.ViewOffset,
+				LastViewedAt: v.LastViewedAt,
 			}
-			if v.ViewCount > 0 {
-				progress.Viewed = true
-			} else if v.ViewOffset > 0 {
+			if v.ViewOffset > 0 && v.ViewCount == 0 {
 				// Plex exposes a non-zero offset while an unwatched item has playback progress.
 				progress.Watching = true
 			}

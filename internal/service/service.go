@@ -10,6 +10,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/andrew/rotator/internal/media"
 	"github.com/andrew/rotator/internal/media/plex"
 	"github.com/andrew/rotator/internal/repository"
 	"github.com/andrew/rotator/internal/rotation"
@@ -272,7 +273,7 @@ func (s *Service) ReconcileSeries(ctx context.Context, id string) error {
 		return fmt.Errorf("get episode progress: %w", err)
 	}
 
-	if len(progressList) > 0 && progressList[0].Viewed {
+	if len(progressList) > 0 && progressList[0].ViewCount > 0 && progressList[0].LastViewedAt > 0 {
 		return s.advanceCursor(ctx, series.ID, *progress.NextEpisodeID)
 	}
 
@@ -656,7 +657,8 @@ func (s *Service) SyncRotation(ctx context.Context) error {
 			continue
 		}
 
-		if p.Viewed && item.Status != "watched" {
+		newlyViewed := newlyViewedAfter(p, rot.GeneratedAt)
+		if newlyViewed && item.Status != "watched" {
 			if err := s.rotationRepo.UpdateItemStatus(ctx, item.ID, "watched"); err != nil {
 				slog.Warn("update item status failed", "item_id", item.ID, "error", err)
 				continue
@@ -668,7 +670,7 @@ func (s *Service) SyncRotation(ctx context.Context) error {
 			}
 		}
 
-		if p.Viewed {
+		if newlyViewed {
 			allWatched = allWatched && true
 		} else {
 			allWatched = false
@@ -1924,7 +1926,8 @@ func (s *Service) SyncPlaylist(ctx context.Context, playlistID string) (int, int
 			}
 			continue
 		}
-		if !progress.Viewed {
+		newlyViewed := newlyViewedAfter(progress, item.CreatedAt)
+		if !newlyViewed {
 			continue
 		}
 
@@ -1979,6 +1982,12 @@ func (s *Service) SyncPlaylist(ctx context.Context, playlistID string) (int, int
 	}
 
 	return watched, queued, nil
+}
+
+func newlyViewedAfter(progress media.EpisodeProgress, queuedAt time.Time) bool {
+	return progress.ViewCount > 0 &&
+		progress.LastViewedAt > 0 &&
+		time.Unix(progress.LastViewedAt, 0).After(queuedAt)
 }
 
 func (s *Service) SyncEnabledPlaylists(ctx context.Context) error {
