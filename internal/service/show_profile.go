@@ -31,7 +31,7 @@ func (r ShowProfileRules) Allows(ep repository.Episode) bool {
 func filterAllowedEpisodes(episodes []repository.Episode, rules ShowProfileRules) []repository.Episode {
 	allowed := make([]repository.Episode, 0, len(episodes))
 	for _, ep := range episodes {
-		if rules.Allows(ep) {
+		if !ep.Unavailable && rules.Allows(ep) {
 			allowed = append(allowed, ep)
 		}
 	}

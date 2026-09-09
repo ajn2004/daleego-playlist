@@ -2,6 +2,7 @@ package plex
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -128,6 +129,9 @@ func TestUpsertPlaylistUsesServerMetadataURI(t *testing.T) {
 			}
 			w.Header().Set("Content-Type", "application/xml")
 			_, _ = w.Write([]byte(`<MediaContainer><Playlist ratingKey="500" title="Rotation" /></MediaContainer>`))
+		case "/playlists/500/items":
+			w.Header().Set("Content-Type", "application/xml")
+			_, _ = w.Write([]byte(`<MediaContainer size="2"><Video ratingKey="100"/><Video ratingKey="101"/></MediaContainer>`))
 		default:
 			t.Errorf("unexpected request path %s", r.URL.Path)
 		}
@@ -142,19 +146,24 @@ func TestUpsertPlaylistUsesServerMetadataURI(t *testing.T) {
 	if playlist.ID != "500" {
 		t.Errorf("playlist ID = %q, want 500", playlist.ID)
 	}
-	if requests != 2 {
-		t.Errorf("requests = %d, want 2", requests)
+	if requests != 3 {
+		t.Errorf("requests = %d, want 3", requests)
 	}
 }
 
 func TestUpsertPlaylistUpdateUsesServerMetadataURI(t *testing.T) {
+	updated := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/playlists/500/items":
 			switch r.Method {
 			case http.MethodGet:
 				w.Header().Set("Content-Type", "application/xml")
-				_, _ = w.Write([]byte(`<MediaContainer size="2"><Video ratingKey="99"/><Video ratingKey="100"/></MediaContainer>`))
+				if updated {
+					_, _ = w.Write([]byte(`<MediaContainer size="2"><Video ratingKey="100"/><Video ratingKey="101"/></MediaContainer>`))
+				} else {
+					_, _ = w.Write([]byte(`<MediaContainer size="2"><Video ratingKey="99"/><Video ratingKey="100"/></MediaContainer>`))
+				}
 			case http.MethodDelete:
 				want := "server://server-id/com.plexapp.plugins.library/library/metadata/99,100"
 				if got := r.URL.Query().Get("uri"); got != want {
@@ -166,6 +175,7 @@ func TestUpsertPlaylistUpdateUsesServerMetadataURI(t *testing.T) {
 				if got := r.URL.Query().Get("uri"); got != want {
 					t.Errorf("playlist URI = %q, want %q", got, want)
 				}
+				updated = true
 				w.WriteHeader(http.StatusNoContent)
 			default:
 				t.Errorf("unexpected method %s", r.Method)
@@ -273,6 +283,54 @@ func TestListPlaylistItems(t *testing.T) {
 	}
 	if items[0].EpisodeID != "100" || items[0].SeriesTitle != "The Expanse" || items[0].EpisodeNumber != 1 {
 		t.Errorf("first item = %+v", items[0])
+	}
+}
+
+func TestListPlaylistItemsCollectsPaginatedResults(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		offset := r.URL.Query().Get("offset")
+		w.Header().Set("Content-Type", "application/xml")
+		switch offset {
+		case "0":
+			_, _ = w.Write([]byte(`<MediaContainer offset="0" size="8" totalSize="10"><Video ratingKey="1"/><Video ratingKey="2"/><Video ratingKey="3"/><Video ratingKey="4"/><Video ratingKey="5"/><Video ratingKey="6"/><Video ratingKey="7"/><Video ratingKey="8"/></MediaContainer>`))
+		case "8":
+			_, _ = w.Write([]byte(`<MediaContainer offset="8" size="2" totalSize="10"><Video ratingKey="9"/><Video ratingKey="10"/></MediaContainer>`))
+		default:
+			t.Errorf("unexpected offset %q", offset)
+		}
+	}))
+	defer server.Close()
+	items, err := NewClient(server.URL, "test-token", 5*time.Second).ListPlaylistItems(context.Background(), "500")
+	if err != nil {
+		t.Fatalf("ListPlaylistItems failed: %v", err)
+	}
+	if len(items) != 10 || items[8].EpisodeID != "9" || items[9].EpisodeID != "10" {
+		t.Fatalf("items = %#v", items)
+	}
+}
+
+func TestUpsertPlaylistDetectsExactProjectionMismatch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		switch r.URL.Path {
+		case "/":
+			_, _ = w.Write([]byte(`<MediaContainer machineIdentifier="server-id"/>`))
+		case "/playlists":
+			_, _ = w.Write([]byte(`<MediaContainer><Playlist ratingKey="500" title="Rotation"/></MediaContainer>`))
+		case "/playlists/500/items":
+			_, _ = w.Write([]byte(`<MediaContainer size="1"><Video ratingKey="100"/></MediaContainer>`))
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	_, err := NewClient(server.URL, "test-token", 5*time.Second).UpsertPlaylist(context.Background(), nil, "Rotation", []string{"100", "101"})
+	var mismatch *PublicationMismatchError
+	if !errors.As(err, &mismatch) {
+		t.Fatalf("error = %v, want PublicationMismatchError", err)
+	}
+	if len(mismatch.Missing) != 1 || mismatch.Missing[0] != "101" {
+		t.Fatalf("mismatch = %#v", mismatch)
 	}
 }
 

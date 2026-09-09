@@ -189,6 +189,7 @@ type Episode struct {
 	Duration        int       `json:"duration"`
 	Rating          float64   `json:"rating"`
 	AirDate         string    `json:"air_date"`
+	Unavailable     bool      `json:"unavailable"`
 	CreatedAt       time.Time `json:"created_at"`
 }
 
@@ -206,8 +207,8 @@ func (r *EpisodeRepo) Upsert(ctx context.Context, e *Episode) error {
 		airDate = nil
 	}
 	_, err := r.pool.Exec(ctx,
-		`INSERT INTO episodes (id, series_id, server_episode_id, season_number, episode_number, absolute_order, title, duration_seconds, rating, originally_available_at, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		`INSERT INTO episodes (id, series_id, server_episode_id, season_number, episode_number, absolute_order, title, duration_seconds, rating, originally_available_at, unavailable, created_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, false, $11)
 		 ON CONFLICT (series_id, server_episode_id) DO UPDATE SET
 		   season_number = EXCLUDED.season_number,
 		   episode_number = EXCLUDED.episode_number,
@@ -215,7 +216,8 @@ func (r *EpisodeRepo) Upsert(ctx context.Context, e *Episode) error {
 		   title = EXCLUDED.title,
 		   duration_seconds = EXCLUDED.duration_seconds,
 		   rating = EXCLUDED.rating,
-		   originally_available_at = EXCLUDED.originally_available_at`,
+		   originally_available_at = EXCLUDED.originally_available_at,
+		   unavailable = false`,
 		e.ID, e.SeriesID, e.ServerEpisodeID, e.SeasonNumber, e.EpisodeNumber, e.AbsoluteOrder, e.Title, e.Duration, e.Rating, airDate, time.Now())
 	return err
 }
@@ -251,6 +253,9 @@ func (r *EpisodeRepo) UpsertAll(ctx context.Context, episodes []*Episode) error 
 		WHERE series_id = $1`, seriesID, len(episodes)); err != nil {
 		return fmt.Errorf("stage episode positions: %w", err)
 	}
+	if _, err := tx.Exec(ctx, `UPDATE episodes SET unavailable = true WHERE series_id = $1`, seriesID); err != nil {
+		return fmt.Errorf("mark missing episodes unavailable: %w", err)
+	}
 
 	for _, episode := range episodes {
 		var airDate interface{} = episode.AirDate
@@ -258,8 +263,8 @@ func (r *EpisodeRepo) UpsertAll(ctx context.Context, episodes []*Episode) error 
 			airDate = nil
 		}
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO episodes (id, series_id, server_episode_id, season_number, episode_number, absolute_order, title, duration_seconds, rating, originally_available_at, created_at)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			`INSERT INTO episodes (id, series_id, server_episode_id, season_number, episode_number, absolute_order, title, duration_seconds, rating, originally_available_at, unavailable, created_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, false, $11)
 			 ON CONFLICT (series_id, server_episode_id) DO UPDATE SET
 			   season_number = EXCLUDED.season_number,
 			   episode_number = EXCLUDED.episode_number,
@@ -267,7 +272,8 @@ func (r *EpisodeRepo) UpsertAll(ctx context.Context, episodes []*Episode) error 
 			   title = EXCLUDED.title,
 			   duration_seconds = EXCLUDED.duration_seconds,
 			   rating = EXCLUDED.rating,
-			   originally_available_at = EXCLUDED.originally_available_at`,
+			   originally_available_at = EXCLUDED.originally_available_at,
+			   unavailable = false`,
 			episode.ID, episode.SeriesID, episode.ServerEpisodeID, episode.SeasonNumber, episode.EpisodeNumber, episode.AbsoluteOrder, episode.Title, episode.Duration, episode.Rating, airDate, time.Now()); err != nil {
 			return fmt.Errorf("upsert episode %q: %w", episode.Title, err)
 		}
@@ -280,7 +286,7 @@ func (r *EpisodeRepo) UpsertAll(ctx context.Context, episodes []*Episode) error 
 }
 
 func (r *EpisodeRepo) ListBySeries(ctx context.Context, seriesID string) ([]Episode, error) {
-	rows, err := r.pool.Query(ctx, `SELECT id, series_id, server_episode_id, season_number, episode_number, absolute_order, title, duration_seconds, rating, COALESCE(originally_available_at::text, ''), created_at FROM episodes WHERE series_id = $1 ORDER BY absolute_order`, seriesID)
+	rows, err := r.pool.Query(ctx, `SELECT id, series_id, server_episode_id, season_number, episode_number, absolute_order, title, duration_seconds, rating, COALESCE(originally_available_at::text, ''), unavailable, created_at FROM episodes WHERE series_id = $1 ORDER BY absolute_order`, seriesID)
 	if err != nil {
 		return nil, fmt.Errorf("list episodes: %w", err)
 	}
@@ -289,7 +295,7 @@ func (r *EpisodeRepo) ListBySeries(ctx context.Context, seriesID string) ([]Epis
 	var episodes []Episode
 	for rows.Next() {
 		var e Episode
-		if err := rows.Scan(&e.ID, &e.SeriesID, &e.ServerEpisodeID, &e.SeasonNumber, &e.EpisodeNumber, &e.AbsoluteOrder, &e.Title, &e.Duration, &e.Rating, &e.AirDate, &e.CreatedAt); err != nil {
+		if err := rows.Scan(&e.ID, &e.SeriesID, &e.ServerEpisodeID, &e.SeasonNumber, &e.EpisodeNumber, &e.AbsoluteOrder, &e.Title, &e.Duration, &e.Rating, &e.AirDate, &e.Unavailable, &e.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan episode: %w", err)
 		}
 		episodes = append(episodes, e)
@@ -301,9 +307,9 @@ func (r *EpisodeRepo) ListBySeries(ctx context.Context, seriesID string) ([]Epis
 }
 
 func (r *EpisodeRepo) GetByID(ctx context.Context, id string) (*Episode, error) {
-	row := r.pool.QueryRow(ctx, `SELECT id, series_id, server_episode_id, season_number, episode_number, absolute_order, title, duration_seconds, rating, COALESCE(originally_available_at::text, ''), created_at FROM episodes WHERE id = $1`, id)
+	row := r.pool.QueryRow(ctx, `SELECT id, series_id, server_episode_id, season_number, episode_number, absolute_order, title, duration_seconds, rating, COALESCE(originally_available_at::text, ''), unavailable, created_at FROM episodes WHERE id = $1`, id)
 	var e Episode
-	if err := row.Scan(&e.ID, &e.SeriesID, &e.ServerEpisodeID, &e.SeasonNumber, &e.EpisodeNumber, &e.AbsoluteOrder, &e.Title, &e.Duration, &e.Rating, &e.AirDate, &e.CreatedAt); err != nil {
+	if err := row.Scan(&e.ID, &e.SeriesID, &e.ServerEpisodeID, &e.SeasonNumber, &e.EpisodeNumber, &e.AbsoluteOrder, &e.Title, &e.Duration, &e.Rating, &e.AirDate, &e.Unavailable, &e.CreatedAt); err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, fmt.Errorf("episode not found")
 		}
@@ -314,12 +320,12 @@ func (r *EpisodeRepo) GetByID(ctx context.Context, id string) (*Episode, error) 
 
 func (r *EpisodeRepo) GetByServerEpisodeID(ctx context.Context, mediaServerID, serverEpisodeID string) (*Episode, error) {
 	row := r.pool.QueryRow(ctx,
-		`SELECT e.id, e.series_id, e.server_episode_id, e.season_number, e.episode_number, e.absolute_order, e.title, e.duration_seconds, e.rating, COALESCE(e.originally_available_at::text, ''), e.created_at
+		`SELECT e.id, e.series_id, e.server_episode_id, e.season_number, e.episode_number, e.absolute_order, e.title, e.duration_seconds, e.rating, COALESCE(e.originally_available_at::text, ''), e.unavailable, e.created_at
 		 FROM episodes e
 		 JOIN series s ON s.id = e.series_id
 		 WHERE s.media_server_id = $1 AND e.server_episode_id = $2`, mediaServerID, serverEpisodeID)
 	var e Episode
-	if err := row.Scan(&e.ID, &e.SeriesID, &e.ServerEpisodeID, &e.SeasonNumber, &e.EpisodeNumber, &e.AbsoluteOrder, &e.Title, &e.Duration, &e.Rating, &e.AirDate, &e.CreatedAt); err != nil {
+	if err := row.Scan(&e.ID, &e.SeriesID, &e.ServerEpisodeID, &e.SeasonNumber, &e.EpisodeNumber, &e.AbsoluteOrder, &e.Title, &e.Duration, &e.Rating, &e.AirDate, &e.Unavailable, &e.CreatedAt); err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, fmt.Errorf("episode not found")
 		}

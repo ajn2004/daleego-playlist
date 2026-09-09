@@ -2,10 +2,13 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
+	"github.com/andrew/rotator/internal/media/plex"
 	"github.com/andrew/rotator/internal/rotation"
+	"github.com/andrew/rotator/internal/service"
 )
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -212,6 +215,11 @@ func (s *Server) handleGenerateRotation(w http.ResponseWriter, r *http.Request) 
 func (s *Server) handlePublishRotation(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := s.svc.PublishRotation(r.Context(), id); err != nil {
+		var mismatch *plex.PublicationMismatchError
+		if errors.As(err, &mismatch) {
+			writeJSON(w, http.StatusBadGateway, map[string]interface{}{"error": map[string]interface{}{"code": "publication_mismatch", "message": mismatch.Error(), "details": mismatch}})
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "publish_failed", err.Error())
 		return
 	}
@@ -444,6 +452,11 @@ func (s *Server) handleRefillPlaylist(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handlePublishPlaylist(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := s.svc.PublishPlaylist(r.Context(), id); err != nil {
+		var mismatch *plex.PublicationMismatchError
+		if errors.As(err, &mismatch) {
+			writeJSON(w, http.StatusBadGateway, map[string]interface{}{"error": map[string]interface{}{"code": "publication_mismatch", "message": mismatch.Error(), "details": mismatch}})
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "publish_failed", err.Error())
 		return
 	}
@@ -471,13 +484,20 @@ func (s *Server) handleGetPlexPlaylist(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleReplacePlexPlaylist(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ServerEpisodeIDs []string `json:"server_episode_ids"`
+		BaseRevision        string   `json:"base_revision"`
+		OrderedQueueItemIDs []string `json:"ordered_queue_item_ids"`
+		RemovedQueueItemIDs []string `json:"removed_queue_item_ids"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json", "Invalid request body")
 		return
 	}
-	if err := s.svc.ReplacePlexPlaylist(r.Context(), r.PathValue("id"), req.ServerEpisodeIDs); err != nil {
+	if err := s.svc.ReplacePlexPlaylist(r.Context(), r.PathValue("id"), req.BaseRevision, req.OrderedQueueItemIDs, req.RemovedQueueItemIDs); err != nil {
+		var stale *service.StalePlaylistEditError
+		if errors.As(err, &stale) {
+			writeError(w, http.StatusConflict, "stale_playlist_edit", err.Error())
+			return
+		}
 		writeError(w, http.StatusBadRequest, "replace_plex_playlist_failed", err.Error())
 		return
 	}

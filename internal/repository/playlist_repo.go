@@ -382,10 +382,47 @@ func (r *PlaylistRepo) MarkSeriesSeen(ctx context.Context, playlistSeriesID stri
 func (r *PlaylistRepo) AddHistory(ctx context.Context, playlistSeriesID, episodeID string) error {
 	_, err := r.pool.Exec(ctx,
 		`INSERT INTO playlist_series_history (id, playlist_series_id, episode_id, played_at)
-		 VALUES (gen_random_uuid(), $1, $2, now())
-		 ON CONFLICT (playlist_series_id, episode_id) DO NOTHING`,
+		 VALUES (gen_random_uuid(), $1, $2, now())`,
 		playlistSeriesID, episodeID)
 	return err
+}
+
+// CompleteQueueItem consumes one queue occurrence exactly once. The queue row
+// is the durable occurrence key; the same episode may occur again later.
+func (r *PlaylistRepo) CompleteQueueItem(ctx context.Context, itemID, playlistSeriesID, episodeID string, nextEpisodeID *string, nextPosition *int) (bool, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin completion: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var status string
+	if err := tx.QueryRow(ctx, `SELECT status FROM playlist_queue_items WHERE id = $1 FOR UPDATE`, itemID).Scan(&status); err != nil {
+		if err == pgx.ErrNoRows {
+			return false, nil
+		}
+		return false, fmt.Errorf("lock queue occurrence: %w", err)
+	}
+	if status != "pending" && status != "pushed" && status != "watching" {
+		return false, nil
+	}
+
+	if _, err := tx.Exec(ctx, `INSERT INTO playlist_series_history (id, playlist_series_id, episode_id, played_at) VALUES (gen_random_uuid(), $1, $2, now())`, playlistSeriesID, episodeID); err != nil {
+		return false, fmt.Errorf("record history: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE playlist_series_progress SET last_watched_episode_id = $2, next_episode_id = $3, next_position = $4, updated_at = now() WHERE playlist_series_id = $1 AND next_episode_id = $2`, playlistSeriesID, episodeID, nextEpisodeID, nextPosition); err != nil {
+		return false, fmt.Errorf("advance playlist progression: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE playlist_series SET last_seen_at = now() WHERE id = $1`, playlistSeriesID); err != nil {
+		return false, fmt.Errorf("mark playlist series seen: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM playlist_queue_items WHERE id = $1`, itemID); err != nil {
+		return false, fmt.Errorf("remove completed queue occurrence: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit completion: %w", err)
+	}
+	return true, nil
 }
 
 func (r *PlaylistRepo) ListHistory(ctx context.Context, playlistSeriesID string) ([]PlaylistHistory, error) {

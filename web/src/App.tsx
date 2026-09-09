@@ -262,6 +262,9 @@ function PlaylistEditor({
   const [plexLoaded, setPlexLoaded] = useState(false)
   const [plexLoading, setPlexLoading] = useState(false)
   const [plexSaving, setPlexSaving] = useState(false)
+  const [plexBaseRevision, setPlexBaseRevision] = useState('')
+  const [plexSnapshotIDs, setPlexSnapshotIDs] = useState<string[]>([])
+  const [plexActualCount, setPlexActualCount] = useState(0)
   const [profileWorkbenchFor, setProfileWorkbenchFor] = useState<string | null>(null)
 
   useEffect(() => {
@@ -296,8 +299,32 @@ function PlaylistEditor({
   const loadPlexItems = async () => {
     setPlexLoading(true)
     try {
-      const state = await api.playlists.plexItems(playlist.id)
-      setPlexItems(state.items)
+      const [state, authoritative] = await Promise.all([
+        api.playlists.plexItems(playlist.id),
+        api.playlists.get(playlist.id),
+      ])
+      setDetail(authoritative)
+      const actualByID = new Map(state.items.map(item => [item.queue_item_id, item]))
+      // Edit the authoritative local queue. Plex omissions remain visible as
+      // a publication discrepancy instead of becoming implicit removals.
+      const localItems = (authoritative.queue_items || [])
+        .filter(item => item.status === 'pending' || item.status === 'pushed' || item.status === 'watching')
+        .sort((a, b) => a.position - b.position)
+        .map(item => {
+          const actual = actualByID.get(item.id)
+          return actual || {
+            queue_item_id: item.id,
+            server_episode_id: item.server_episode_id,
+            series_title: item.series_title,
+            episode_title: item.episode_title,
+            season_number: item.season_number,
+            episode_number: item.episode_number,
+          }
+        })
+      setPlexItems(localItems)
+      setPlexBaseRevision(state.base_revision)
+      setPlexActualCount(state.items.length)
+      setPlexSnapshotIDs(localItems.map(item => item.queue_item_id).filter(Boolean))
       setPlexLoaded(true)
     } catch (e: any) {
       setPlexItems([])
@@ -328,10 +355,17 @@ function PlaylistEditor({
     }
     setPlexSaving(true)
     try {
-      await api.playlists.replacePlexItems(playlist.id, plexItems.map(item => item.server_episode_id))
+      const retained = plexItems.map(item => item.queue_item_id).filter(Boolean)
+      const retainedSet = new Set(retained)
+      const removed = plexSnapshotIDs.filter(id => !retainedSet.has(id))
+      await api.playlists.replacePlexItems(playlist.id, {
+        base_revision: plexBaseRevision,
+        ordered_queue_item_ids: retained,
+        removed_queue_item_ids: removed,
+      })
       await loadDetail()
       await loadPlexItems()
-      onStatus('Playlist updated and refilled')
+      onStatus('Playlist order saved; explicit removals were consumed and the queue was refilled')
     } catch (e: any) {
       onStatus('Plex playlist save failed: ' + e.message)
     }
@@ -864,7 +898,7 @@ function PlaylistEditor({
         </table>
       </div>
 
-      <div className="plex-panel-header"><h3>Plex order <span>{plexLoaded ? plexItems.length : 'not published'}</span></h3><p>Changes reconcile the local queue; removed episodes are consumed and the queue is refilled.</p></div>
+      <div className="plex-panel-header"><h3>Local queue editor <span>{plexLoaded ? `${plexItems.length} local / ${plexActualCount} Plex` : 'not published'}</span></h3><p>Plex is a publication view. Missing Plex items are not consumed; only explicit removals from this editing snapshot are consumed.</p></div>
       <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem' }}>
         <button onClick={loadPlexItems} disabled={plexLoading} style={smallBtn}>
           {plexLoading ? 'Refreshing...' : 'Refresh Plex'}

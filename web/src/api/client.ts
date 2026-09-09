@@ -118,10 +118,10 @@ export const api = {
       request<{ status: string }>(`/api/v1/playlists/${id}/sync`, { method: 'POST' }),
     plexItems: (id: string) =>
       request<import('../types').PlexPlaylistState>(`/api/v1/playlists/${id}/plex-items`),
-    replacePlexItems: (id: string, serverEpisodeIds: string[]) =>
+    replacePlexItems: (id: string, data: { base_revision: string; ordered_queue_item_ids: string[]; removed_queue_item_ids: string[] }) =>
       request<import('../types').PlexPlaylistState>(`/api/v1/playlists/${id}/plex-items`, {
         method: 'PUT',
-        body: JSON.stringify({ server_episode_ids: serverEpisodeIds }),
+        body: JSON.stringify(data),
       }),
     listEpisodes: (playlistId: string, seriesId: string) =>
       request<{ episodes: import('../types').Episode[] }>(`/api/v1/playlists/${playlistId}/series/${seriesId}/episodes`),

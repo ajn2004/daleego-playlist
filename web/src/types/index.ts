@@ -75,6 +75,7 @@ export interface RotationItem {
   position: number
   series_id: string
   episode_id: string
+  server_episode_id: string
   slot_kind: string
   score: number
   score_details: Record<string, unknown>
@@ -107,6 +108,7 @@ export interface Playlist {
   queue_items?: PlaylistQueueItem[]
   queue_pending_count: number
 	remaining_serial_duration_seconds: number
+	 revision: string
 }
 
 export interface PlaylistSeries {
@@ -169,6 +171,7 @@ export interface PlaylistQueueItem {
   series_id: string
   series_title: string
   episode_id: string
+  server_episode_id: string
   episode_title: string
   season_number: number
   episode_number: number
@@ -178,6 +181,7 @@ export interface PlaylistQueueItem {
 }
 
 export interface PlexPlaylistItem {
+	queue_item_id: string
   server_episode_id: string
   series_title: string
   episode_title: string
@@ -187,6 +191,7 @@ export interface PlexPlaylistItem {
 
 export interface PlexPlaylistState {
   items: PlexPlaylistItem[]
+  base_revision: string
 }
 
 export interface Episode {

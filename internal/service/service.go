@@ -3,11 +3,14 @@ package service
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"math/big"
 	"sort"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/andrew/rotator/internal/media"
@@ -32,7 +35,9 @@ type Service struct {
 	queueBindingRepo *repository.QueueBindingRepo
 	showProfileRepo  *repository.ShowProfileRepo
 
-	engine *rotation.Engine
+	engine          *rotation.Engine
+	playlistLocksMu sync.Mutex
+	playlistLocks   map[string]*sync.Mutex
 }
 
 func New(
@@ -64,6 +69,7 @@ func New(
 		queueBindingRepo: queueBindingRepo,
 		showProfileRepo:  showProfileRepo,
 		engine:           engine,
+		playlistLocks:    make(map[string]*sync.Mutex),
 	}
 }
 
@@ -771,6 +777,9 @@ func (s *Service) buildCandidates(ctx context.Context) ([]rotation.Candidate, er
 		if err != nil {
 			continue
 		}
+		if episode.Unavailable {
+			continue
+		}
 
 		// Build window ratings
 		episodes, err := s.episodeRepo.ListBySeries(ctx, series.ID)
@@ -826,6 +835,7 @@ type PlaylistResponse struct {
 	QueueItems                     []PlaylistQueueResponse   `json:"queue_items,omitempty"`
 	QueuePending                   int                       `json:"queue_pending_count"`
 	RemainingSerialDurationSeconds int                       `json:"remaining_serial_duration_seconds"`
+	Revision                       string                    `json:"revision"`
 }
 
 type PlaylistSeriesResponse struct {
@@ -849,23 +859,25 @@ type PlaylistSeriesResponse struct {
 }
 
 type PlaylistQueueResponse struct {
-	ID            string   `json:"id"`
-	Position      int      `json:"position"`
-	CycleIndex    int      `json:"cycle_index"`
-	SlotPosition  int      `json:"slot_position"`
-	SlotType      string   `json:"slot_type"`
-	SeriesID      string   `json:"series_id"`
-	SeriesTitle   string   `json:"series_title"`
-	EpisodeID     string   `json:"episode_id"`
-	EpisodeTitle  string   `json:"episode_title"`
-	SeasonNumber  int      `json:"season_number"`
-	EpisodeNumber int      `json:"episode_number"`
-	EpisodeRating *float64 `json:"episode_rating"`
-	Score         *float64 `json:"score"`
-	Status        string   `json:"status"`
+	ID              string   `json:"id"`
+	Position        int      `json:"position"`
+	CycleIndex      int      `json:"cycle_index"`
+	SlotPosition    int      `json:"slot_position"`
+	SlotType        string   `json:"slot_type"`
+	SeriesID        string   `json:"series_id"`
+	SeriesTitle     string   `json:"series_title"`
+	EpisodeID       string   `json:"episode_id"`
+	ServerEpisodeID string   `json:"server_episode_id"`
+	EpisodeTitle    string   `json:"episode_title"`
+	SeasonNumber    int      `json:"season_number"`
+	EpisodeNumber   int      `json:"episode_number"`
+	EpisodeRating   *float64 `json:"episode_rating"`
+	Score           *float64 `json:"score"`
+	Status          string   `json:"status"`
 }
 
 type PlexPlaylistItemResponse struct {
+	QueueItemID     string `json:"queue_item_id"`
 	ServerEpisodeID string `json:"server_episode_id"`
 	SeriesTitle     string `json:"series_title"`
 	EpisodeTitle    string `json:"episode_title"`
@@ -874,7 +886,33 @@ type PlexPlaylistItemResponse struct {
 }
 
 type PlexPlaylistResponse struct {
-	Items []PlexPlaylistItemResponse `json:"items"`
+	Items        []PlexPlaylistItemResponse `json:"items"`
+	BaseRevision string                     `json:"base_revision"`
+}
+
+type StalePlaylistEditError struct{ Expected, Actual string }
+
+func (e *StalePlaylistEditError) Error() string {
+	return fmt.Sprintf("playlist edit is stale: base_revision=%s current_revision=%s", e.Expected, e.Actual)
+}
+
+func (s *Service) playlistLock(id string) *sync.Mutex {
+	s.playlistLocksMu.Lock()
+	defer s.playlistLocksMu.Unlock()
+	if lock := s.playlistLocks[id]; lock != nil {
+		return lock
+	}
+	lock := &sync.Mutex{}
+	s.playlistLocks[id] = lock
+	return lock
+}
+
+func queueRevision(items []repository.PlaylistQueueItem) string {
+	var b strings.Builder
+	for _, item := range items {
+		fmt.Fprintf(&b, "%s:%d:%s:%s|", item.ID, item.Position, item.EpisodeID, item.Status)
+	}
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(b.String())))
 }
 
 func (s *Service) ListPlaylists(ctx context.Context) ([]PlaylistResponse, error) {
@@ -1039,6 +1077,7 @@ func (s *Service) GetPlaylist(ctx context.Context, id string) (*PlaylistResponse
 		}
 		ep, _ := s.episodeRepo.GetByID(ctx, qi.EpisodeID)
 		if ep != nil {
+			q.ServerEpisodeID = ep.ServerEpisodeID
 			q.EpisodeTitle = ep.Title
 			q.SeasonNumber = ep.SeasonNumber
 			q.EpisodeNumber = ep.EpisodeNumber
@@ -1069,13 +1108,14 @@ func (s *Service) GetPlaylist(ctx context.Context, id string) (*PlaylistResponse
 		QueueItems:                     queueResp,
 		QueuePending:                   pending,
 		RemainingSerialDurationSeconds: remainingSerialDuration,
+		Revision:                       queueRevision(queueItems),
 	}, nil
 }
 
 func remainingDuration(episodes []repository.Episode, nextPosition int, rules ShowProfileRules) int {
 	total := 0
 	for _, episode := range episodes {
-		if episode.AbsoluteOrder >= nextPosition && rules.Allows(episode) {
+		if episode.AbsoluteOrder >= nextPosition && !episode.Unavailable && rules.Allows(episode) {
 			total += episode.Duration
 		}
 	}
@@ -1083,6 +1123,9 @@ func remainingDuration(episodes []repository.Episode, nextPosition int, rules Sh
 }
 
 func (s *Service) UpdatePlaylist(ctx context.Context, id, name, plexName string, targetCount int, enabled bool) error {
+	lock := s.playlistLock(id)
+	lock.Lock()
+	defer lock.Unlock()
 	p, err := s.playlistRepo.GetByID(ctx, id)
 	if err != nil {
 		return err
@@ -1104,6 +1147,9 @@ func (s *Service) SetPlaylistSeries(ctx context.Context, playlistID string, seri
 	RandomEpisodeCooldown *int    `json:"random_episode_cooldown"`
 	ShowProfileID         *string `json:"show_profile_id"`
 }) error {
+	lock := s.playlistLock(playlistID)
+	lock.Lock()
+	defer lock.Unlock()
 	playlist, err := s.playlistRepo.GetByID(ctx, playlistID)
 	if err != nil {
 		return fmt.Errorf("get playlist: %w", err)
@@ -1200,6 +1246,9 @@ func (s *Service) SetPlaylistSeries(ctx context.Context, playlistID string, seri
 }
 
 func (s *Service) SetPlaylistSlots(ctx context.Context, playlistID string, slotTypes []string) error {
+	lock := s.playlistLock(playlistID)
+	lock.Lock()
+	defer lock.Unlock()
 	slots := make([]repository.PlaylistSlot, 0, len(slotTypes))
 	for i, st := range slotTypes {
 		slots = append(slots, repository.PlaylistSlot{
@@ -1213,6 +1262,13 @@ func (s *Service) SetPlaylistSlots(ctx context.Context, playlistID string, slotT
 }
 
 func (s *Service) FillPlaylist(ctx context.Context, playlistID string) (int, error) {
+	lock := s.playlistLock(playlistID)
+	lock.Lock()
+	defer lock.Unlock()
+	return s.fillPlaylist(ctx, playlistID)
+}
+
+func (s *Service) fillPlaylist(ctx context.Context, playlistID string) (int, error) {
 	playlist, err := s.playlistRepo.GetByID(ctx, playlistID)
 	if err != nil {
 		return 0, err
@@ -1249,6 +1305,17 @@ func (s *Service) FillPlaylist(ctx context.Context, playlistID string) (int, err
 		}
 	}
 
+	// A complete catalog refresh can confirm an episode is unavailable. Remove
+	// only those confirmed stale queue references; Plex omissions alone never
+	// reach this path.
+	queuedBefore, _ := s.playlistRepo.ListPendingQueueItems(ctx, playlistID)
+	for _, queued := range queuedBefore {
+		if ep, err := s.episodeRepo.GetByID(ctx, queued.EpisodeID); err == nil && ep.Unavailable {
+			if err := s.playlistRepo.UpdateItemStatus(ctx, queued.ID, "skipped"); err != nil {
+				return 0, err
+			}
+		}
+	}
 	pending, err := s.playlistRepo.CountPendingQueueItems(ctx, playlistID)
 	if err != nil {
 		return 0, err
@@ -1356,6 +1423,9 @@ func (s *Service) FillPlaylist(ctx context.Context, playlistID string) (int, err
 		return inserted, countErr
 	}
 	slog.Info("playlist fill complete", "playlist_id", playlistID, "target", playlist.QueueTargetCount, "active", active, "inserted", inserted, "member_count", len(members), "slot_count", len(slots))
+	if active < playlist.QueueTargetCount {
+		return inserted, fmt.Errorf("queue shortfall: target=%d active=%d eligible episodes could not fill the queue", playlist.QueueTargetCount, active)
+	}
 
 	return inserted, nil
 }
@@ -1424,6 +1494,9 @@ func (s *Service) getPlaylistEpisode(ctx context.Context, member repository.Play
 func eligibleRandomEpisodes(episodes []repository.Episode, rules ShowProfileRules, recentHistory, queued map[string]bool) []repository.Episode {
 	eligible := make([]repository.Episode, 0, len(episodes))
 	for _, ep := range episodes {
+		if ep.Unavailable {
+			continue
+		}
 		if rules.Allows(ep) && !recentHistory[ep.ID] && !queued[ep.ID] {
 			eligible = append(eligible, ep)
 		}
@@ -1434,6 +1507,9 @@ func eligibleRandomEpisodes(episodes []repository.Episode, rules ShowProfileRule
 func effectiveRandomEpisodeCooldown(episodes []repository.Episode, rules ShowProfileRules, queued map[string]bool, cooldown int) int {
 	available := 0
 	for _, ep := range episodes {
+		if ep.Unavailable {
+			continue
+		}
 		if rules.Allows(ep) && !queued[ep.ID] {
 			available++
 		}
@@ -1462,6 +1538,9 @@ func firstAllowedUnqueuedEpisodeAtCursorWithHistory(episodes []repository.Episod
 			continue
 		}
 		if queued[ep.ID] || history[ep.ID] {
+			continue
+		}
+		if ep.Unavailable {
 			continue
 		}
 		if !rules.Allows(ep) {
@@ -1573,6 +1652,9 @@ func (s *Service) ListPlaylistSeriesEpisodes(ctx context.Context, playlistID, se
 }
 
 func (s *Service) SetPlaylistNextEpisode(ctx context.Context, playlistID, seriesID, episodeID string) error {
+	lock := s.playlistLock(playlistID)
+	lock.Lock()
+	defer lock.Unlock()
 	ep, err := s.episodeRepo.GetByID(ctx, episodeID)
 	if err != nil {
 		return fmt.Errorf("episode not found: %w", err)
@@ -1696,9 +1778,12 @@ func ratedFillCandidates(candidates []fillCandidate) []fillCandidate {
 }
 
 func (s *Service) PublishPlaylist(ctx context.Context, playlistID string) error {
+	lock := s.playlistLock(playlistID)
+	lock.Lock()
+	defer lock.Unlock()
 	// Fill queue to target before publishing
-	if _, err := s.FillPlaylist(ctx, playlistID); err != nil {
-		slog.Warn("fill before publish failed", "playlist_id", playlistID, "error", err)
+	if _, err := s.fillPlaylist(ctx, playlistID); err != nil {
+		return fmt.Errorf("fill before publish: %w", err)
 	}
 	return s.publishPlaylistProjection(ctx, playlistID)
 }
@@ -1733,13 +1818,31 @@ func (s *Service) publishPlaylistProjection(ctx context.Context, playlistID stri
 	client := plex.NewClient(server.URL, server.Token, 30*time.Second)
 
 	episodeIDs := make([]string, len(items))
+	seenPlexIDs := make(map[string]string, len(items))
+	duplicatePlexIDs := make([]string, 0)
 	for i, item := range items {
 		ep, err := s.episodeRepo.GetByID(ctx, item.EpisodeID)
 		if err != nil {
 			return fmt.Errorf("get episode %s: %w", item.EpisodeID, err)
 		}
 		episodeIDs[i] = ep.ServerEpisodeID
+		series, _ := s.seriesRepo.GetByID(ctx, item.SeriesID)
+		seriesTitle := ""
+		if series != nil {
+			seriesTitle = series.Title
+		}
+		if prior, duplicate := seenPlexIDs[ep.ServerEpisodeID]; duplicate {
+			duplicatePlexIDs = append(duplicatePlexIDs, ep.ServerEpisodeID)
+			slog.Error("duplicate Plex episode ID in intended projection", "playlist_id", playlistID, "plex_episode_id", ep.ServerEpisodeID, "queue_item_id", item.ID, "duplicate_queue_item_id", prior)
+		} else {
+			seenPlexIDs[ep.ServerEpisodeID] = item.ID
+		}
+		slog.Info("playlist projection queue item", "playlist_id", playlistID, "position", item.Position, "queue_item_id", item.ID, "local_episode_id", item.EpisodeID, "plex_episode_id", ep.ServerEpisodeID, "series_title", seriesTitle, "episode_title", ep.Title)
 	}
+	if len(duplicatePlexIDs) > 0 {
+		return fmt.Errorf("duplicate Plex episode IDs in intended projection: %v", duplicatePlexIDs)
+	}
+	slog.Info("playlist projection submit", "playlist_id", playlistID, "requested_count", len(episodeIDs), "requested_plex_episode_ids", episodeIDs)
 
 	// Look up existing binding for this queue playlist
 	var playlistIDPtr *string
@@ -1750,8 +1853,20 @@ func (s *Service) publishPlaylistProjection(ctx context.Context, playlistID stri
 
 	plexPlaylist, err := client.UpsertPlaylist(ctx, playlistIDPtr, p.PlexPlaylistName, episodeIDs)
 	if err != nil {
+		if mismatch, ok := err.(*plex.PublicationMismatchError); ok {
+			slog.Error("playlist projection verification failed", "playlist_id", playlistID, "expected_count", len(mismatch.Expected), "actual_count", len(mismatch.Actual), "expected_plex_episode_ids", mismatch.Expected, "actual_plex_episode_ids", mismatch.Actual, "missing_plex_episode_ids", mismatch.Missing, "unexpected_plex_episode_ids", mismatch.Unexpected, "order_mismatches", mismatch.OrderMismatches)
+		}
 		return fmt.Errorf("upsert plex playlist: %w", err)
 	}
+	readback, err := client.ListPlaylistItems(ctx, plexPlaylist.ID)
+	if err != nil {
+		return fmt.Errorf("read back verified Plex playlist: %w", err)
+	}
+	actualIDs := make([]string, len(readback))
+	for i, item := range readback {
+		actualIDs[i] = item.EpisodeID
+	}
+	slog.Info("playlist projection readback", "playlist_id", playlistID, "plex_playlist_id", plexPlaylist.ID, "actual_count", len(actualIDs), "actual_plex_episode_ids", actualIDs)
 
 	now := time.Now()
 	bindingRecord := &repository.QueuePlaylistBinding{
@@ -1776,6 +1891,13 @@ func (s *Service) publishPlaylistProjection(ctx context.Context, playlistID stri
 
 // ClearPlaylistQueue removes both the local queue and its derived Plex playlist.
 func (s *Service) ClearPlaylistQueue(ctx context.Context, playlistID string) error {
+	lock := s.playlistLock(playlistID)
+	lock.Lock()
+	defer lock.Unlock()
+	return s.clearPlaylistQueue(ctx, playlistID)
+}
+
+func (s *Service) clearPlaylistQueue(ctx context.Context, playlistID string) error {
 	p, err := s.playlistRepo.GetByID(ctx, playlistID)
 	if err != nil {
 		return err
@@ -1797,17 +1919,20 @@ func (s *Service) ClearPlaylistQueue(ctx context.Context, playlistID string) err
 }
 
 func (s *Service) RefillPlaylist(ctx context.Context, playlistID string) (int, error) {
-	if err := s.ClearPlaylistQueue(ctx, playlistID); err != nil {
+	lock := s.playlistLock(playlistID)
+	lock.Lock()
+	defer lock.Unlock()
+	if err := s.clearPlaylistQueue(ctx, playlistID); err != nil {
 		return 0, err
 	}
-	queued, err := s.FillPlaylist(ctx, playlistID)
+	queued, err := s.fillPlaylist(ctx, playlistID)
 	if err != nil {
 		return 0, fmt.Errorf("fill cleared queue: %w", err)
 	}
 	if queued == 0 {
 		return 0, nil
 	}
-	if err := s.PublishPlaylist(ctx, playlistID); err != nil {
+	if err := s.publishPlaylistProjection(ctx, playlistID); err != nil {
 		return 0, fmt.Errorf("publish refilled queue: %w", err)
 	}
 	return queued, nil
@@ -1832,8 +1957,16 @@ func (s *Service) GetPlexPlaylist(ctx context.Context, playlistID string) (*Plex
 		return nil, err
 	}
 	response := &PlexPlaylistResponse{Items: make([]PlexPlaylistItemResponse, 0, len(items))}
+	active, _ := s.playlistRepo.ListPendingQueueItems(ctx, playlistID)
+	byPlexID := make(map[string]string, len(active))
+	for _, queued := range active {
+		if ep, err := s.episodeRepo.GetByID(ctx, queued.EpisodeID); err == nil {
+			byPlexID[ep.ServerEpisodeID] = queued.ID
+		}
+	}
 	for _, item := range items {
 		response.Items = append(response.Items, PlexPlaylistItemResponse{
+			QueueItemID:     byPlexID[item.EpisodeID],
 			ServerEpisodeID: item.EpisodeID,
 			SeriesTitle:     item.SeriesTitle,
 			EpisodeTitle:    item.EpisodeTitle,
@@ -1841,10 +1974,18 @@ func (s *Service) GetPlexPlaylist(ctx context.Context, playlistID string) (*Plex
 			EpisodeNumber:   item.EpisodeNumber,
 		})
 	}
+	response.BaseRevision = queueRevision(active)
 	return response, nil
 }
 
-func (s *Service) ReplacePlexPlaylist(ctx context.Context, playlistID string, episodeIDs []string) error {
+func (s *Service) ReplacePlexPlaylist(ctx context.Context, playlistID, baseRevision string, orderedItemIDs, removedItemIDs []string) error {
+	lock := s.playlistLock(playlistID)
+	lock.Lock()
+	defer lock.Unlock()
+	return s.replacePlexPlaylist(ctx, playlistID, baseRevision, orderedItemIDs, removedItemIDs)
+}
+
+func (s *Service) replacePlexPlaylist(ctx context.Context, playlistID, baseRevision string, orderedItemIDs, removedItemIDs []string) error {
 	p, err := s.playlistRepo.GetByID(ctx, playlistID)
 	if err != nil {
 		return err
@@ -1858,41 +1999,49 @@ func (s *Service) ReplacePlexPlaylist(ctx context.Context, playlistID string, ep
 	if err != nil {
 		return fmt.Errorf("list active queue: %w", err)
 	}
-	byServerEpisode := make(map[string]*repository.PlaylistQueueItem, len(active))
+	currentRevision := queueRevision(active)
+	if baseRevision != currentRevision {
+		return &StalePlaylistEditError{Expected: baseRevision, Actual: currentRevision}
+	}
+	byID := make(map[string]*repository.PlaylistQueueItem, len(active))
 	for i := range active {
-		ep, err := s.episodeRepo.GetByID(ctx, active[i].EpisodeID)
-		if err != nil {
-			return fmt.Errorf("get queued episode %s: %w", active[i].EpisodeID, err)
-		}
-		byServerEpisode[ep.ServerEpisodeID] = &active[i]
+		byID[active[i].ID] = &active[i]
 	}
-
-	orderedIDs := make([]string, 0, len(episodeIDs))
-	retained := make(map[string]bool, len(episodeIDs))
-	for _, serverEpisodeID := range episodeIDs {
-		if retained[serverEpisodeID] {
-			return fmt.Errorf("episode %s appears more than once", serverEpisodeID)
+	retained := make(map[string]bool, len(orderedItemIDs))
+	for _, itemID := range orderedItemIDs {
+		if retained[itemID] {
+			return fmt.Errorf("queue item %s appears more than once", itemID)
 		}
-		item, ok := byServerEpisode[serverEpisodeID]
-		if !ok {
-			return fmt.Errorf("episode %s is not in the active local queue", serverEpisodeID)
+		if _, ok := byID[itemID]; !ok {
+			return fmt.Errorf("queue item %s is not in the editing snapshot", itemID)
 		}
-		retained[serverEpisodeID] = true
-		orderedIDs = append(orderedIDs, item.ID)
+		retained[itemID] = true
 	}
-
-	for serverEpisodeID, item := range byServerEpisode {
-		if retained[serverEpisodeID] {
-			continue
+	removed := make(map[string]bool, len(removedItemIDs))
+	for _, itemID := range removedItemIDs {
+		if removed[itemID] {
+			return fmt.Errorf("queue item %s appears more than once in removals", itemID)
 		}
-		if err := s.completePlaylistQueueItem(ctx, p, item); err != nil {
-			return fmt.Errorf("complete removed queue item %s: %w", item.ID, err)
+		if _, ok := byID[itemID]; !ok {
+			return fmt.Errorf("queue item %s is not in the editing snapshot", itemID)
+		}
+		if retained[itemID] {
+			return fmt.Errorf("queue item %s is both retained and removed", itemID)
+		}
+		removed[itemID] = true
+	}
+	if len(retained)+len(removed) != len(active) {
+		return fmt.Errorf("editing snapshot must explicitly retain or remove every active queue item")
+	}
+	for itemID := range removed {
+		if err := s.completePlaylistQueueItem(ctx, p, byID[itemID]); err != nil {
+			return fmt.Errorf("complete explicitly removed queue item %s: %w", itemID, err)
 		}
 	}
-	if err := s.playlistRepo.ReorderActiveQueueItems(ctx, playlistID, orderedIDs); err != nil {
+	if err := s.playlistRepo.ReorderActiveQueueItems(ctx, playlistID, orderedItemIDs); err != nil {
 		return fmt.Errorf("reorder queue: %w", err)
 	}
-	if _, err := s.FillPlaylist(ctx, playlistID); err != nil {
+	if _, err := s.fillPlaylist(ctx, playlistID); err != nil {
 		return fmt.Errorf("refill reconciled queue: %w", err)
 	}
 	if err := s.publishPlaylistProjection(ctx, playlistID); err != nil {
@@ -1912,9 +2061,8 @@ func (s *Service) completePlaylistQueueItem(ctx context.Context, playlist *repos
 		}
 		playlistSeriesID = &id
 	}
-	if err := s.playlistRepo.AddHistory(ctx, *playlistSeriesID, item.EpisodeID); err != nil {
-		return fmt.Errorf("record history: %w", err)
-	}
+	var nextID *string
+	var nextPos *int
 	if item.PlaylistSeriesID != nil {
 		// A queued look-ahead episode is valid to consume without moving the
 		// cursor. Only the current cursor episode advances progression.
@@ -1923,24 +2071,50 @@ func (s *Service) completePlaylistQueueItem(ctx context.Context, playlist *repos
 			return fmt.Errorf("get playlist progress: %w", err)
 		}
 		if progress != nil && progress.NextEpisodeID != nil && *progress.NextEpisodeID == item.EpisodeID {
-			if err := s.advancePlaylistCursor(ctx, *item.PlaylistSeriesID, item.EpisodeID); err != nil {
-				return fmt.Errorf("advance playlist cursor: %w", err)
+			member, err := s.playlistRepo.GetPlaylistSeriesByID(ctx, *item.PlaylistSeriesID)
+			if err != nil {
+				return fmt.Errorf("get playlist series: %w", err)
+			}
+			episodes, err := s.episodeRepo.ListBySeries(ctx, member.SeriesID)
+			if err != nil {
+				return err
+			}
+			rules, err := s.profileRules(ctx, member.ShowProfileID)
+			if err != nil {
+				return err
+			}
+			for i := range episodes {
+				if episodes[i].ID == item.EpisodeID {
+					for j := i + 1; j < len(episodes); j++ {
+						if !episodes[j].Unavailable && rules.Allows(episodes[j]) {
+							nextID = &episodes[j].ID
+							nextPos = &episodes[j].AbsoluteOrder
+							break
+						}
+					}
+					break
+				}
 			}
 		}
 	}
-	if err := s.playlistRepo.MarkSeriesSeen(ctx, *playlistSeriesID); err != nil {
-		return fmt.Errorf("mark playlist series seen: %w", err)
+	completed, err := s.playlistRepo.CompleteQueueItem(ctx, item.ID, *playlistSeriesID, item.EpisodeID, nextID, nextPos)
+	if err != nil {
+		return err
 	}
-	if err := s.playlistRepo.UpdateItemStatus(ctx, item.ID, "watched"); err != nil {
-		return fmt.Errorf("mark queue item watched: %w", err)
-	}
-	if _, err := s.playlistRepo.DeleteWatchedQueueItem(ctx, item.ID); err != nil {
-		return fmt.Errorf("remove completed queue item: %w", err)
+	if !completed {
+		return nil
 	}
 	return nil
 }
 
 func (s *Service) SyncPlaylist(ctx context.Context, playlistID string) (int, int, error) {
+	lock := s.playlistLock(playlistID)
+	lock.Lock()
+	defer lock.Unlock()
+	return s.syncPlaylist(ctx, playlistID)
+}
+
+func (s *Service) syncPlaylist(ctx context.Context, playlistID string) (int, int, error) {
 	p, err := s.playlistRepo.GetByID(ctx, playlistID)
 	if err != nil {
 		return 0, 0, err
@@ -1986,7 +2160,7 @@ func (s *Service) SyncPlaylist(ctx context.Context, playlistID string) (int, int
 		}
 		if progress.Watching && item.Status != "watching" {
 			if err := s.playlistRepo.UpdateItemStatus(ctx, item.ID, "watching"); err != nil {
-				slog.Warn("update watching item status failed", "item_id", item.ID, "error", err)
+				return watched, 0, fmt.Errorf("update watching item %s: %w", item.ID, err)
 			}
 			continue
 		}
@@ -1996,13 +2170,12 @@ func (s *Service) SyncPlaylist(ctx context.Context, playlistID string) (int, int
 		}
 
 		if err := s.completePlaylistQueueItem(ctx, p, item); err != nil {
-			slog.Warn("complete playlist queue item failed", "item_id", item.ID, "error", err)
-			continue
+			return watched, 0, fmt.Errorf("complete playlist queue item %s: %w", item.ID, err)
 		}
 		watched++
 	}
 
-	queued, err := s.FillPlaylist(ctx, playlistID)
+	queued, err := s.fillPlaylist(ctx, playlistID)
 	if err != nil {
 		return watched, 0, fmt.Errorf("refill queue: %w", err)
 	}
