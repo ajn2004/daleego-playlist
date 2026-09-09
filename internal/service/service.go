@@ -1279,86 +1279,71 @@ func (s *Service) FillPlaylist(ctx context.Context, playlistID string) (int, err
 
 	inserted := 0
 	consumedSlots := 0
-	lastCycleIndex := -1
-	var candidates []fillCandidate
-	for attempts := 0; inserted < need && attempts < need*len(slots); attempts++ {
-		globalSlotPos := playlist.CycleCursor + consumedSlots
-		cycleIndex := globalSlotPos / len(slots)
-		slotPosition := globalSlotPos % len(slots)
-		slot := slots[slotPosition]
+	for inserted < need {
+		// A cycle is one pass over every configured slot. The queue may have
+		// more candidates after a selection, so stopping on an attempt count can
+		// incorrectly leave a target-sized queue short.
+		candidates := make([]fillCandidate, 0, len(members))
+		for _, m := range members {
+			episodeID, rating, err := s.getPlaylistEpisode(ctx, m, playlistID, queuedEpisodes)
+			if err != nil || episodeID == "" {
+				continue
+			}
+			candidates = append(candidates, fillCandidate{
+				seriesID: m.SeriesID, psID: m.ID, mode: m.Mode,
+				episodeID: episodeID, rating: rating, lastSeenAt: m.LastSeenAt,
+			})
+		}
 
-		newCycle := false
-		if cycleIndex != lastCycleIndex {
-			newCycle = true
-			lastCycleIndex = cycleIndex
-			candidates = nil
-			for _, m := range members {
-				episodeID, rating, err := s.getPlaylistEpisode(ctx, m, playlistID, queuedEpisodes)
-				if err != nil || episodeID == "" {
+		insertedThisCycle := 0
+		for slotOffset := 0; slotOffset < len(slots) && inserted < need; slotOffset++ {
+			globalSlotPos := playlist.CycleCursor + consumedSlots
+			cycleIndex := globalSlotPos / len(slots)
+			slotPosition := globalSlotPos % len(slots)
+			slot := slots[slotPosition]
+			consumedSlots++
+
+			selected, ok := selectFillCandidate(candidates, slot.SlotType, globalSlotPos, len(members))
+			if !ok {
+				continue
+			}
+
+			pos := maxPos + inserted + 1
+			score := selected.rating
+			item := &repository.PlaylistQueueItem{
+				ID: uuid.New().String(), PlaylistID: playlistID,
+				CycleIndex: cycleIndex, SlotPosition: slotPosition, SlotType: slot.SlotType,
+				SeriesID: selected.seriesID, EpisodeID: selected.episodeID,
+				Position: pos, Score: &score, Status: "pending",
+			}
+			if selected.mode == "serial" {
+				item.PlaylistSeriesID = &selected.psID
+			}
+			if err := s.playlistRepo.AddQueueItem(ctx, item); err != nil {
+				return 0, err
+			}
+
+			queuedEpisodes[selected.episodeID] = true
+			for i, candidate := range candidates {
+				if candidate.seriesID != selected.seriesID {
 					continue
 				}
-
-				candidates = append(candidates, fillCandidate{
-					seriesID:   m.SeriesID,
-					psID:       m.ID,
-					mode:       m.Mode,
-					episodeID:  episodeID,
-					rating:     rating,
-					lastSeenAt: m.LastSeenAt,
-				})
-			}
-		}
-
-		if len(candidates) == 0 {
-			if newCycle {
-				break
-			}
-			consumedSlots++
-			continue
-		}
-
-		selected, ok := selectFillCandidate(candidates, slot.SlotType, globalSlotPos, len(members))
-		consumedSlots++
-		if !ok {
-			continue
-		}
-
-		pos := maxPos + inserted + 1
-		score := selected.rating
-		item := &repository.PlaylistQueueItem{
-			ID:           uuid.New().String(),
-			PlaylistID:   playlistID,
-			CycleIndex:   cycleIndex,
-			SlotPosition: slotPosition,
-			SlotType:     slot.SlotType,
-			SeriesID:     selected.seriesID,
-			EpisodeID:    selected.episodeID,
-			Position:     pos,
-			Score:        &score,
-			Status:       "pending",
-		}
-		if selected.mode == "serial" {
-			item.PlaylistSeriesID = &selected.psID
-		}
-
-		if err := s.playlistRepo.AddQueueItem(ctx, item); err != nil {
-			return 0, err
-		}
-
-		queuedEpisodes[selected.episodeID] = true
-		for i, candidate := range candidates {
-			if candidate.seriesID == selected.seriesID {
 				episodeID, rating, err := s.getPlaylistEpisode(ctx, membersByID[candidate.psID], playlistID, queuedEpisodes)
 				if err != nil || episodeID == "" {
 					candidates = append(candidates[:i], candidates[i+1:]...)
-					break
+				} else {
+					candidates[i].episodeID = episodeID
+					candidates[i].rating = rating
 				}
-				candidates[i].episodeID = episodeID
-				candidates[i].rating = rating
 				break
 			}
+			inserted++
+			insertedThisCycle++
 		}
-		inserted++
+
+		if insertedThisCycle == 0 {
+			break
+		}
 	}
 
 	if consumedSlots > 0 {
@@ -1366,6 +1351,11 @@ func (s *Service) FillPlaylist(ctx context.Context, playlistID string) (int, err
 			return 0, err
 		}
 	}
+	active, countErr := s.playlistRepo.CountPendingQueueItems(ctx, playlistID)
+	if countErr != nil {
+		return inserted, countErr
+	}
+	slog.Info("playlist fill complete", "playlist_id", playlistID, "target", playlist.QueueTargetCount, "active", active, "inserted", inserted, "member_count", len(members), "slot_count", len(slots))
 
 	return inserted, nil
 }
@@ -1391,7 +1381,11 @@ func (s *Service) getPlaylistEpisode(ctx context.Context, member repository.Play
 			return "", 0, nil
 		}
 
-		if ep, ok := firstAllowedUnqueuedEpisodeAtCursor(episodes, *progress.NextEpisodeID, progress.NextPosition, queued, rules); ok {
+		history, err := s.playlistRepo.HistoryEpisodeIDs(ctx, member.ID)
+		if err != nil {
+			return "", 0, err
+		}
+		if ep, ok := firstAllowedUnqueuedEpisodeAtCursorWithHistory(episodes, *progress.NextEpisodeID, progress.NextPosition, queued, history, rules); ok {
 			return ep.ID, ep.Rating, nil
 		}
 		return "", 0, nil
@@ -1448,10 +1442,14 @@ func effectiveRandomEpisodeCooldown(episodes []repository.Episode, rules ShowPro
 }
 
 func firstUnqueuedEpisodeAtCursor(episodes []repository.Episode, nextEpisodeID string, nextPosition *int, queued map[string]bool) (repository.Episode, bool) {
-	return firstAllowedUnqueuedEpisodeAtCursor(episodes, nextEpisodeID, nextPosition, queued, ShowProfileRules{DefaultAllow: true})
+	return firstAllowedUnqueuedEpisodeAtCursorWithHistory(episodes, nextEpisodeID, nextPosition, queued, nil, ShowProfileRules{DefaultAllow: true})
 }
 
 func firstAllowedUnqueuedEpisodeAtCursor(episodes []repository.Episode, nextEpisodeID string, nextPosition *int, queued map[string]bool, rules ShowProfileRules) (repository.Episode, bool) {
+	return firstAllowedUnqueuedEpisodeAtCursorWithHistory(episodes, nextEpisodeID, nextPosition, queued, nil, rules)
+}
+
+func firstAllowedUnqueuedEpisodeAtCursorWithHistory(episodes []repository.Episode, nextEpisodeID string, nextPosition *int, queued, history map[string]bool, rules ShowProfileRules) (repository.Episode, bool) {
 	atCursor := nextPosition != nil
 	for _, ep := range episodes {
 		if !atCursor {
@@ -1463,7 +1461,7 @@ func firstAllowedUnqueuedEpisodeAtCursor(episodes []repository.Episode, nextEpis
 		if nextPosition != nil && ep.AbsoluteOrder < *nextPosition {
 			continue
 		}
-		if queued[ep.ID] {
+		if queued[ep.ID] || history[ep.ID] {
 			continue
 		}
 		if !rules.Allows(ep) {
@@ -1525,6 +1523,10 @@ func (s *Service) advancePlaylistCursor(ctx context.Context, playlistSeriesID, w
 	if err != nil {
 		return err
 	}
+	history, err := s.playlistRepo.HistoryEpisodeIDs(ctx, playlistSeriesID)
+	if err != nil {
+		return err
+	}
 
 	var nextEpisode *repository.Episode
 	advance := false
@@ -1534,6 +1536,9 @@ func (s *Service) advancePlaylistCursor(ctx context.Context, playlistSeriesID, w
 			continue
 		}
 		if advance && rules.Allows(ep) {
+			if history[ep.ID] {
+				continue
+			}
 			nextEpisode = &ep
 			break
 		}
@@ -1840,36 +1845,97 @@ func (s *Service) GetPlexPlaylist(ctx context.Context, playlistID string) (*Plex
 }
 
 func (s *Service) ReplacePlexPlaylist(ctx context.Context, playlistID string, episodeIDs []string) error {
-	if len(episodeIDs) == 0 {
-		return fmt.Errorf("at least one episode is required")
-	}
 	p, err := s.playlistRepo.GetByID(ctx, playlistID)
 	if err != nil {
 		return err
 	}
 	binding, err := s.queueBindingRepo.GetByPlaylist(ctx, playlistID)
-	if err != nil || binding.ServerPlaylistID == nil || *binding.ServerPlaylistID == "" {
+	if err != nil || binding == nil || binding.ServerPlaylistID == nil || *binding.ServerPlaylistID == "" {
 		return fmt.Errorf("playlist has not been published to Plex")
 	}
-	server, err := s.serverRepo.GetByID(ctx, p.MediaServerID)
+
+	active, err := s.playlistRepo.ListPendingQueueItems(ctx, playlistID)
 	if err != nil {
-		return fmt.Errorf("get server: %w", err)
+		return fmt.Errorf("list active queue: %w", err)
+	}
+	byServerEpisode := make(map[string]*repository.PlaylistQueueItem, len(active))
+	for i := range active {
+		ep, err := s.episodeRepo.GetByID(ctx, active[i].EpisodeID)
+		if err != nil {
+			return fmt.Errorf("get queued episode %s: %w", active[i].EpisodeID, err)
+		}
+		byServerEpisode[ep.ServerEpisodeID] = &active[i]
 	}
 
-	for _, episodeID := range episodeIDs {
-		if _, err := s.episodeRepo.GetByServerEpisodeID(ctx, server.ID, episodeID); err != nil {
-			return fmt.Errorf("validate Plex episode %s: %w", episodeID, err)
+	orderedIDs := make([]string, 0, len(episodeIDs))
+	retained := make(map[string]bool, len(episodeIDs))
+	for _, serverEpisodeID := range episodeIDs {
+		if retained[serverEpisodeID] {
+			return fmt.Errorf("episode %s appears more than once", serverEpisodeID)
+		}
+		item, ok := byServerEpisode[serverEpisodeID]
+		if !ok {
+			return fmt.Errorf("episode %s is not in the active local queue", serverEpisodeID)
+		}
+		retained[serverEpisodeID] = true
+		orderedIDs = append(orderedIDs, item.ID)
+	}
+
+	for serverEpisodeID, item := range byServerEpisode {
+		if retained[serverEpisodeID] {
+			continue
+		}
+		if err := s.completePlaylistQueueItem(ctx, p, item); err != nil {
+			return fmt.Errorf("complete removed queue item %s: %w", item.ID, err)
 		}
 	}
-
-	client := plex.NewClient(server.URL, server.Token, 30*time.Second)
-	if _, err := client.UpsertPlaylist(ctx, binding.ServerPlaylistID, p.PlexPlaylistName, episodeIDs); err != nil {
-		return fmt.Errorf("replace Plex playlist: %w", err)
+	if err := s.playlistRepo.ReorderActiveQueueItems(ctx, playlistID, orderedIDs); err != nil {
+		return fmt.Errorf("reorder queue: %w", err)
 	}
-	now := time.Now()
-	binding.SynchronizedAt = &now
-	if err := s.queueBindingRepo.Upsert(ctx, binding); err != nil {
-		return fmt.Errorf("save playlist binding: %w", err)
+	if _, err := s.FillPlaylist(ctx, playlistID); err != nil {
+		return fmt.Errorf("refill reconciled queue: %w", err)
+	}
+	if err := s.publishPlaylistProjection(ctx, playlistID); err != nil {
+		return fmt.Errorf("publish reconciled queue: %w", err)
+	}
+	return nil
+}
+
+// completePlaylistQueueItem is the only path for consuming an active item.
+// Consumption is local to this playlist and never changes Plex watch state.
+func (s *Service) completePlaylistQueueItem(ctx context.Context, playlist *repository.Playlist, item *repository.PlaylistQueueItem) error {
+	playlistSeriesID := item.PlaylistSeriesID
+	if playlistSeriesID == nil {
+		id, err := s.findPlaylistSeriesID(ctx, playlist.ID, item.SeriesID)
+		if err != nil {
+			return err
+		}
+		playlistSeriesID = &id
+	}
+	if err := s.playlistRepo.AddHistory(ctx, *playlistSeriesID, item.EpisodeID); err != nil {
+		return fmt.Errorf("record history: %w", err)
+	}
+	if item.PlaylistSeriesID != nil {
+		// A queued look-ahead episode is valid to consume without moving the
+		// cursor. Only the current cursor episode advances progression.
+		progress, err := s.playlistRepo.GetProgress(ctx, *item.PlaylistSeriesID)
+		if err != nil {
+			return fmt.Errorf("get playlist progress: %w", err)
+		}
+		if progress != nil && progress.NextEpisodeID != nil && *progress.NextEpisodeID == item.EpisodeID {
+			if err := s.advancePlaylistCursor(ctx, *item.PlaylistSeriesID, item.EpisodeID); err != nil {
+				return fmt.Errorf("advance playlist cursor: %w", err)
+			}
+		}
+	}
+	if err := s.playlistRepo.MarkSeriesSeen(ctx, *playlistSeriesID); err != nil {
+		return fmt.Errorf("mark playlist series seen: %w", err)
+	}
+	if err := s.playlistRepo.UpdateItemStatus(ctx, item.ID, "watched"); err != nil {
+		return fmt.Errorf("mark queue item watched: %w", err)
+	}
+	if _, err := s.playlistRepo.DeleteWatchedQueueItem(ctx, item.ID); err != nil {
+		return fmt.Errorf("remove completed queue item: %w", err)
 	}
 	return nil
 }
@@ -1913,8 +1979,6 @@ func (s *Service) SyncPlaylist(ctx context.Context, playlistID string) (int, int
 	}
 
 	watched := 0
-	watchedIDs := make([]string, 0, len(progressList))
-
 	for _, progress := range progressList {
 		item, ok := itemByServerID[progress.EpisodeID]
 		if !ok {
@@ -1931,44 +1995,11 @@ func (s *Service) SyncPlaylist(ctx context.Context, playlistID string) (int, int
 			continue
 		}
 
-		if err := s.playlistRepo.UpdateItemStatus(ctx, item.ID, "watched"); err != nil {
-			slog.Warn("update item status failed", "item_id", item.ID, "error", err)
+		if err := s.completePlaylistQueueItem(ctx, p, item); err != nil {
+			slog.Warn("complete playlist queue item failed", "item_id", item.ID, "error", err)
 			continue
 		}
-
-		if item.PlaylistSeriesID != nil {
-			if err := s.advancePlaylistCursor(ctx, *item.PlaylistSeriesID, item.EpisodeID); err != nil {
-				slog.Warn("advance playlist cursor failed", "item_id", item.ID, "error", err)
-			}
-			if err := s.playlistRepo.MarkSeriesSeen(ctx, *item.PlaylistSeriesID); err != nil {
-				slog.Warn("mark playlist series seen failed", "item_id", item.ID, "error", err)
-			}
-		} else {
-			// Non-serial: add to history
-			psID, err := s.findPlaylistSeriesID(ctx, p.ID, item.SeriesID)
-			if err != nil {
-				slog.Warn("find playlist series failed", "series_id", item.SeriesID, "error", err)
-				continue
-			}
-			if err := s.playlistRepo.AddHistory(ctx, psID, item.EpisodeID); err != nil {
-				slog.Warn("add history failed", "error", err)
-				continue
-			}
-			if err := s.playlistRepo.MarkSeriesSeen(ctx, psID); err != nil {
-				slog.Warn("mark playlist series seen failed", "item_id", item.ID, "error", err)
-			}
-		}
-
 		watched++
-		watchedIDs = append(watchedIDs, item.ID)
-	}
-
-	if len(watchedIDs) > 0 {
-		for _, id := range watchedIDs {
-			if _, err := s.playlistRepo.DeleteWatchedQueueItem(ctx, id); err != nil {
-				slog.Warn("delete watched item failed", "item_id", id, "error", err)
-			}
-		}
 	}
 
 	queued, err := s.FillPlaylist(ctx, playlistID)

@@ -477,10 +477,6 @@ func (s *Server) handleReplacePlexPlaylist(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "invalid_json", "Invalid request body")
 		return
 	}
-	if len(req.ServerEpisodeIDs) == 0 {
-		writeError(w, http.StatusBadRequest, "missing_episodes", "at least one episode is required")
-		return
-	}
 	if err := s.svc.ReplacePlexPlaylist(r.Context(), r.PathValue("id"), req.ServerEpisodeIDs); err != nil {
 		writeError(w, http.StatusBadRequest, "replace_plex_playlist_failed", err.Error())
 		return

@@ -382,7 +382,8 @@ func (r *PlaylistRepo) MarkSeriesSeen(ctx context.Context, playlistSeriesID stri
 func (r *PlaylistRepo) AddHistory(ctx context.Context, playlistSeriesID, episodeID string) error {
 	_, err := r.pool.Exec(ctx,
 		`INSERT INTO playlist_series_history (id, playlist_series_id, episode_id, played_at)
-		 VALUES (gen_random_uuid(), $1, $2, now())`,
+		 VALUES (gen_random_uuid(), $1, $2, now())
+		 ON CONFLICT (playlist_series_id, episode_id) DO NOTHING`,
 		playlistSeriesID, episodeID)
 	return err
 }
@@ -554,6 +555,36 @@ func (r *PlaylistRepo) DeleteWatchedQueueItem(ctx context.Context, itemID string
 		return 0, fmt.Errorf("delete watched item: %w", err)
 	}
 	return int(tag.RowsAffected()), nil
+}
+
+// ReorderActiveQueueItems persists the submitted order without colliding with
+// the queue's unique (playlist_id, position) constraint.
+func (r *PlaylistRepo) ReorderActiveQueueItems(ctx context.Context, playlistID string, orderedItemIDs []string) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin reorder transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	if len(orderedItemIDs) == 0 {
+		return tx.Commit(ctx)
+	}
+
+	if _, err := tx.Exec(ctx,
+		`UPDATE playlist_queue_items SET position = -(position + 1)
+		 WHERE playlist_id = $1 AND id = ANY($2)`, playlistID, orderedItemIDs); err != nil {
+		return fmt.Errorf("temporarily reorder queue items: %w", err)
+	}
+	for position, itemID := range orderedItemIDs {
+		if _, err := tx.Exec(ctx,
+			`UPDATE playlist_queue_items SET position = $3
+			 WHERE playlist_id = $1 AND id = $2 AND status IN ('pending', 'pushed', 'watching')`,
+			playlistID, itemID, position+1); err != nil {
+			return fmt.Errorf("set queue item position: %w", err)
+		}
+	}
+
+	return tx.Commit(ctx)
 }
 
 func (r *PlaylistRepo) ClearQueue(ctx context.Context, playlistID string) error {

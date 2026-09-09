@@ -95,7 +95,7 @@ make spike
 - `POST /api/v1/playlists/{id}/refill` - Rebuild and publish a fresh queue
 - `POST /api/v1/playlists/{id}/sync` - Detect playback progress, advance completed serial cursors, and refill the queue
 - `GET /api/v1/playlists/{id}/plex-items` - Read the current Plex playlist order
-- `PUT /api/v1/playlists/{id}/plex-items` - Replace the Plex playlist with ordered episode IDs
+- `PUT /api/v1/playlists/{id}/plex-items` - Reconcile the submitted order against the authoritative local queue; omitted items are consumed locally, the queue is refilled to target, and Plex is republished
 
 The server performs an immediate show discovery poll at startup and repeats it
 every 600 seconds by default. Configure the interval with

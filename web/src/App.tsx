@@ -262,8 +262,6 @@ function PlaylistEditor({
   const [plexLoaded, setPlexLoaded] = useState(false)
   const [plexLoading, setPlexLoading] = useState(false)
   const [plexSaving, setPlexSaving] = useState(false)
-  const [plexSeriesID, setPlexSeriesID] = useState('')
-  const [plexEpisodeID, setPlexEpisodeID] = useState('')
   const [profileWorkbenchFor, setProfileWorkbenchFor] = useState<string | null>(null)
 
   useEffect(() => {
@@ -323,33 +321,6 @@ function PlaylistEditor({
     setPlexItems(plexItems.filter((_, itemIndex) => itemIndex !== index))
   }
 
-  const selectPlexSeries = async (seriesID: string) => {
-    setPlexSeriesID(seriesID)
-    setPlexEpisodeID('')
-    if (seriesID && !episodeCache[seriesID]) {
-      try {
-        const res = await api.playlists.listEpisodes(playlist.id, seriesID)
-        setEpisodeCache(prev => ({ ...prev, [seriesID]: res.episodes }))
-      } catch (e: any) {
-        onStatus('Failed to load episodes: ' + e.message)
-      }
-    }
-  }
-
-  const addPlexItem = () => {
-    const episode = (episodeCache[plexSeriesID] || []).find(ep => ep.id === plexEpisodeID)
-    const show = (detail?.series || []).find(item => item.series_id === plexSeriesID)
-    if (!episode || !show) return
-    setPlexItems([...plexItems, {
-      server_episode_id: episode.server_episode_id,
-      series_title: show.title,
-      episode_title: episode.title,
-      season_number: episode.season_number,
-      episode_number: episode.episode_number,
-    }])
-    setPlexEpisodeID('')
-  }
-
   const savePlexItems = async () => {
     if (plexItems.length === 0) {
       onStatus('A Plex playlist must contain at least one episode')
@@ -357,10 +328,10 @@ function PlaylistEditor({
     }
     setPlexSaving(true)
     try {
-      const state = await api.playlists.replacePlexItems(playlist.id, plexItems.map(item => item.server_episode_id))
-      setPlexItems(state.items)
-      setPlexLoaded(true)
-      onStatus('Plex playlist updated')
+      await api.playlists.replacePlexItems(playlist.id, plexItems.map(item => item.server_episode_id))
+      await loadDetail()
+      await loadPlexItems()
+      onStatus('Playlist updated and refilled')
     } catch (e: any) {
       onStatus('Plex playlist save failed: ' + e.message)
     }
@@ -893,28 +864,17 @@ function PlaylistEditor({
         </table>
       </div>
 
-      <div className="plex-panel-header"><h3>Plex order <span>{plexLoaded ? plexItems.length : 'not published'}</span></h3><p>Changes replace the local Plex playlist.</p></div>
+      <div className="plex-panel-header"><h3>Plex order <span>{plexLoaded ? plexItems.length : 'not published'}</span></h3><p>Changes reconcile the local queue; removed episodes are consumed and the queue is refilled.</p></div>
       <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem' }}>
         <button onClick={loadPlexItems} disabled={plexLoading} style={smallBtn}>
           {plexLoading ? 'Refreshing...' : 'Refresh Plex'}
         </button>
-        <button onClick={savePlexItems} disabled={!plexLoaded || plexSaving || plexItems.length === 0} style={{ ...smallBtn, background: '#28a745', color: 'white', border: 'none' }}>
+        <button onClick={savePlexItems} disabled={!plexLoaded || plexSaving} style={{ ...smallBtn, background: '#28a745', color: 'white', border: 'none' }}>
           {plexSaving ? 'Saving...' : 'Save Plex Order'}
         </button>
       </div>
       {plexLoaded && (
         <>
-          <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem' }}>
-            <select value={plexSeriesID} onChange={e => selectPlexSeries(e.target.value)} style={{ flex: 1, padding: '0.3rem' }}>
-              <option value="">Add from attached series...</option>
-              {attachedSeries.map(item => <option key={item.id} value={item.series_id}>{item.title}</option>)}
-            </select>
-            <select value={plexEpisodeID} onChange={e => setPlexEpisodeID(e.target.value)} disabled={!plexSeriesID} style={{ flex: 2, padding: '0.3rem' }}>
-              <option value="">Select episode...</option>
-              {(episodeCache[plexSeriesID] || []).map(ep => <option key={ep.id} value={ep.id}>S{String(ep.season_number).padStart(2, '0')}E{String(ep.episode_number).padStart(2, '0')} - {ep.title}</option>)}
-            </select>
-            <button onClick={addPlexItem} disabled={!plexEpisodeID} style={smallBtn}>Add</button>
-          </div>
           <div style={{ border: '1px solid #ddd', borderRadius: 4 }}>
             {plexItems.map((item, index) => (
               <div key={`${item.server_episode_id}-${index}`} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.4rem', borderBottom: index + 1 < plexItems.length ? '1px solid #eee' : 'none' }}>

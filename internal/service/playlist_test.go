@@ -203,6 +203,27 @@ func TestFirstUnqueuedEpisodeAtCursorLooksAhead(t *testing.T) {
 	}
 }
 
+func TestFirstUnqueuedEpisodeAtCursorSkipsConsumedHistory(t *testing.T) {
+	position := 4
+	episodes := []repository.Episode{
+		{ID: "e4", AbsoluteOrder: 4, Rating: 8.0},
+		{ID: "e5", AbsoluteOrder: 5, Rating: 8.5},
+		{ID: "e6", AbsoluteOrder: 6, Rating: 9.0},
+	}
+
+	got, ok := firstAllowedUnqueuedEpisodeAtCursorWithHistory(
+		episodes,
+		"e4",
+		&position,
+		map[string]bool{"e4": true},
+		map[string]bool{"e5": true},
+		ShowProfileRules{DefaultAllow: true},
+	)
+	if !ok || got.ID != "e6" {
+		t.Fatalf("expected consumed future episode e5 to be skipped, got %#v", got)
+	}
+}
+
 func TestEligibleRandomEpisodesUsesOnlyRecentHistory(t *testing.T) {
 	episodes := []repository.Episode{{ID: "old"}, {ID: "recent"}, {ID: "queued"}, {ID: "available"}}
 	got := eligibleRandomEpisodes(episodes, ShowProfileRules{DefaultAllow: true}, map[string]bool{"recent": true}, map[string]bool{"queued": true})
