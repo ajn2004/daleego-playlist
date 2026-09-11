@@ -317,6 +317,7 @@ func (c *Client) ListSeries(ctx context.Context, libraryID string) ([]media.Seri
 		}
 		series = append(series, media.SeriesMetadata{
 			ID:          d.RatingKey,
+			GUID:        d.GUID,
 			Title:       d.Title,
 			Summary:     d.Summary,
 			Year:        d.Year,

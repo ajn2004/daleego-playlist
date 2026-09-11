@@ -11,6 +11,7 @@ import (
 type Show struct {
 	ServerID     string
 	ServerShowID string
+	GUID         string
 	LibraryID    string
 	Title        string
 }

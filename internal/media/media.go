@@ -10,6 +10,7 @@ type Library struct {
 
 type SeriesMetadata struct {
 	ID          string
+	GUID        string
 	Title       string
 	Summary     string
 	Year        int

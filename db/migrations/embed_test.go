@@ -22,3 +22,13 @@ func TestEmbeddedMigrationsIncludeRandomEpisodeCooldown(t *testing.T) {
 		t.Fatal("random episode cooldown migration is empty")
 	}
 }
+
+func TestEmbeddedMigrationsIncludeSeriesServerGUID(t *testing.T) {
+	contents, err := FS.ReadFile("010_series_server_guid.sql")
+	if err != nil {
+		t.Fatalf("read series GUID migration: %v", err)
+	}
+	if len(contents) == 0 {
+		t.Fatal("series GUID migration is empty")
+	}
+}

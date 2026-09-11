@@ -587,6 +587,10 @@ function PlaylistEditor({
 
   if (!detail) return <div className="empty-state">Loading playlist workspace...</div>
 
+  const activeQueueItems = (detail.queue_items || []).filter(item =>
+    item.status === 'pending' || item.status === 'pushed' || item.status === 'watching'
+  )
+
   return (
     <div className="playlist-workspace">
       <section className="playlist-overview">
@@ -864,7 +868,7 @@ function PlaylistEditor({
             </tr>
           </thead>
           <tbody>
-            {(detail.queue_items || []).map(qi => (
+            {activeQueueItems.map(qi => (
               <tr key={qi.id}>
                 <td style={tdStyle}>{qi.position}</td>
                 <td style={tdStyle}>
@@ -891,7 +895,7 @@ function PlaylistEditor({
                 </td>
               </tr>
             ))}
-            {(!detail.queue_items || detail.queue_items.length === 0) && (
+            {activeQueueItems.length === 0 && (
               <tr><td colSpan={7} style={{ padding: '1rem', textAlign: 'center', color: '#888' }}>Queue is empty. Click Fill to populate.</td></tr>
             )}
           </tbody>

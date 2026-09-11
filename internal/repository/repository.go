@@ -85,6 +85,7 @@ func (r *ServerRepo) GetByID(ctx context.Context, id string) (*MediaServer, erro
 type Series struct {
 	ID             string    `json:"id"`
 	MediaServerID  string    `json:"media_server_id"`
+	ServerGUID     string    `json:"server_guid"`
 	ServerSeriesID string    `json:"server_series_id"`
 	LibraryID      string    `json:"library_id"`
 	Title          string    `json:"title"`
@@ -102,29 +103,92 @@ func NewSeriesRepo(pool *pgxpool.Pool) *SeriesRepo {
 }
 
 func (r *SeriesRepo) Upsert(ctx context.Context, s *Series) error {
-	_, err := r.pool.Exec(ctx,
-		`INSERT INTO series (id, media_server_id, server_series_id, library_id, title, active, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin series upsert: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// A Plex rating key can change, so prefer the stable show GUID when one is
+	// available. Updating the caller's ID is important for the subsequent
+	// episode import.
+	if s.ServerGUID != "" {
+		var id string
+		err = tx.QueryRow(ctx, `UPDATE series SET server_series_id = $3, library_id = $4, title = $5, server_guid = $2, updated_at = now()
+			WHERE media_server_id = $1 AND server_guid = $2 RETURNING id`, s.MediaServerID, s.ServerGUID, s.ServerSeriesID, s.LibraryID, s.Title).Scan(&id)
+		if err == nil {
+			s.ID = id
+			return tx.Commit(ctx)
+		}
+		if err != pgx.ErrNoRows {
+			return fmt.Errorf("reconcile series by GUID: %w", err)
+		}
+	}
+
+	err = tx.QueryRow(ctx,
+		`INSERT INTO series (id, media_server_id, server_series_id, server_guid, library_id, title, active, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
 		 ON CONFLICT (media_server_id, server_series_id) DO UPDATE SET
+		   server_guid = COALESCE(EXCLUDED.server_guid, series.server_guid),
 		   title = EXCLUDED.title,
 		   library_id = EXCLUDED.library_id,
-		   updated_at = EXCLUDED.updated_at`,
-		s.ID, s.MediaServerID, s.ServerSeriesID, s.LibraryID, s.Title, s.Active, time.Now())
-	return err
+		   updated_at = EXCLUDED.updated_at
+		 RETURNING id`, s.ID, s.MediaServerID, s.ServerSeriesID, nullableString(s.ServerGUID), s.LibraryID, s.Title, s.Active, time.Now()).Scan(&s.ID)
+	if err != nil {
+		return fmt.Errorf("upsert series: %w", err)
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *SeriesRepo) UpsertDiscovered(ctx context.Context, s *Series) (bool, error) {
+	if s.ServerGUID != "" {
+		var id string
+		err := r.pool.QueryRow(ctx, `UPDATE series SET server_series_id = $3, library_id = $4, title = $5, server_guid = $2, updated_at = now()
+			WHERE media_server_id = $1 AND server_guid = $2 RETURNING id`, s.MediaServerID, s.ServerGUID, s.ServerSeriesID, s.LibraryID, s.Title).Scan(&id)
+		if err == nil {
+			s.ID = id
+			return false, nil
+		}
+		if err != pgx.ErrNoRows {
+			return false, fmt.Errorf("reconcile discovered series by GUID: %w", err)
+		}
+	}
+
 	var inserted bool
 	err := r.pool.QueryRow(ctx, `
-		INSERT INTO series (id, media_server_id, server_series_id, library_id, title, active, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, false, now(), now())
-		ON CONFLICT (media_server_id, server_series_id) DO UPDATE SET title = EXCLUDED.title, library_id = EXCLUDED.library_id, updated_at = now()
-		RETURNING (xmax = 0)`, s.ID, s.MediaServerID, s.ServerSeriesID, s.LibraryID, s.Title).Scan(&inserted)
+		INSERT INTO series (id, media_server_id, server_series_id, server_guid, library_id, title, active, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, false, now(), now())
+		ON CONFLICT (media_server_id, server_series_id) DO UPDATE SET server_guid = COALESCE(EXCLUDED.server_guid, series.server_guid), title = EXCLUDED.title, library_id = EXCLUDED.library_id, updated_at = now()
+		RETURNING id, (xmax = 0)`, s.ID, s.MediaServerID, s.ServerSeriesID, nullableString(s.ServerGUID), s.LibraryID, s.Title).Scan(&s.ID, &inserted)
 	return inserted, err
 }
 
+func nullableString(value string) interface{} {
+	if value == "" {
+		return nil
+	}
+	return value
+}
+
+func (r *SeriesRepo) GetByServerGUID(ctx context.Context, mediaServerID, guid string) (*Series, error) {
+	row := r.pool.QueryRow(ctx, `SELECT id, media_server_id, COALESCE(server_guid, ''), server_series_id, library_id, title, active, created_at, updated_at
+		FROM series WHERE media_server_id = $1 AND server_guid = $2`, mediaServerID, guid)
+	return scanSeries(row)
+}
+
+func scanSeries(row pgx.Row) (*Series, error) {
+	var s Series
+	if err := row.Scan(&s.ID, &s.MediaServerID, &s.ServerGUID, &s.ServerSeriesID, &s.LibraryID, &s.Title, &s.Active, &s.CreatedAt, &s.UpdatedAt); err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, fmt.Errorf("series not found")
+		}
+		return nil, fmt.Errorf("scan series: %w", err)
+	}
+	return &s, nil
+}
+
 func (r *SeriesRepo) List(ctx context.Context) ([]Series, error) {
-	rows, err := r.pool.Query(ctx, `SELECT id, media_server_id, server_series_id, library_id, title, active, created_at, updated_at FROM series ORDER BY title`)
+	rows, err := r.pool.Query(ctx, `SELECT id, media_server_id, COALESCE(server_guid, ''), server_series_id, library_id, title, active, created_at, updated_at FROM series ORDER BY title`)
 	if err != nil {
 		return nil, fmt.Errorf("list series: %w", err)
 	}
@@ -133,7 +197,7 @@ func (r *SeriesRepo) List(ctx context.Context) ([]Series, error) {
 	var series []Series
 	for rows.Next() {
 		var s Series
-		if err := rows.Scan(&s.ID, &s.MediaServerID, &s.ServerSeriesID, &s.LibraryID, &s.Title, &s.Active, &s.CreatedAt, &s.UpdatedAt); err != nil {
+		if err := rows.Scan(&s.ID, &s.MediaServerID, &s.ServerGUID, &s.ServerSeriesID, &s.LibraryID, &s.Title, &s.Active, &s.CreatedAt, &s.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan series: %w", err)
 		}
 		series = append(series, s)
@@ -142,15 +206,7 @@ func (r *SeriesRepo) List(ctx context.Context) ([]Series, error) {
 }
 
 func (r *SeriesRepo) GetByID(ctx context.Context, id string) (*Series, error) {
-	row := r.pool.QueryRow(ctx, `SELECT id, media_server_id, server_series_id, library_id, title, active, created_at, updated_at FROM series WHERE id = $1`, id)
-	var s Series
-	if err := row.Scan(&s.ID, &s.MediaServerID, &s.ServerSeriesID, &s.LibraryID, &s.Title, &s.Active, &s.CreatedAt, &s.UpdatedAt); err != nil {
-		if err == pgx.ErrNoRows {
-			return nil, fmt.Errorf("series not found")
-		}
-		return nil, fmt.Errorf("get series: %w", err)
-	}
-	return &s, nil
+	return scanSeries(r.pool.QueryRow(ctx, `SELECT id, media_server_id, COALESCE(server_guid, ''), server_series_id, library_id, title, active, created_at, updated_at FROM series WHERE id = $1`, id))
 }
 
 func (r *SeriesRepo) SetActive(ctx context.Context, id string, active bool) error {
@@ -159,7 +215,7 @@ func (r *SeriesRepo) SetActive(ctx context.Context, id string, active bool) erro
 }
 
 func (r *SeriesRepo) ListActive(ctx context.Context) ([]Series, error) {
-	rows, err := r.pool.Query(ctx, `SELECT id, media_server_id, server_series_id, library_id, title, active, created_at, updated_at FROM series WHERE active = true ORDER BY title`)
+	rows, err := r.pool.Query(ctx, `SELECT id, media_server_id, COALESCE(server_guid, ''), server_series_id, library_id, title, active, created_at, updated_at FROM series WHERE active = true ORDER BY title`)
 	if err != nil {
 		return nil, fmt.Errorf("list active series: %w", err)
 	}
@@ -168,7 +224,7 @@ func (r *SeriesRepo) ListActive(ctx context.Context) ([]Series, error) {
 	var series []Series
 	for rows.Next() {
 		var s Series
-		if err := rows.Scan(&s.ID, &s.MediaServerID, &s.ServerSeriesID, &s.LibraryID, &s.Title, &s.Active, &s.CreatedAt, &s.UpdatedAt); err != nil {
+		if err := rows.Scan(&s.ID, &s.MediaServerID, &s.ServerGUID, &s.ServerSeriesID, &s.LibraryID, &s.Title, &s.Active, &s.CreatedAt, &s.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan series: %w", err)
 		}
 		series = append(series, s)

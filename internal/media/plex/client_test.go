@@ -73,6 +73,9 @@ func TestListSeries(t *testing.T) {
 	if series[0].Title != "The Expanse" {
 		t.Errorf("expected 'The Expanse', got %s", series[0].Title)
 	}
+	if series[0].GUID != "plex://show/5d776b2f9f0a9a001f0a0a0a" {
+		t.Errorf("expected show GUID, got %q", series[0].GUID)
+	}
 }
 
 func TestListEpisodes(t *testing.T) {

@@ -371,6 +371,51 @@ func (r *PlaylistRepo) AdvanceProgress(ctx context.Context, playlistSeriesID str
 	return err
 }
 
+// ResetSerialProgress changes the cursor and invalidates derived queue/history
+// state at and after the selected episode as one atomic operation.
+func (r *PlaylistRepo) ResetSerialProgress(ctx context.Context, playlistID, playlistSeriesID, seriesID, episodeID string, position int) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin serial progress reset: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var memberSeriesID string
+	if err := tx.QueryRow(ctx, `SELECT series_id FROM playlist_series WHERE id = $1 AND playlist_id = $2 FOR UPDATE`, playlistSeriesID, playlistID).Scan(&memberSeriesID); err != nil {
+		if err == pgx.ErrNoRows {
+			return fmt.Errorf("playlist series not found")
+		}
+		return fmt.Errorf("lock playlist series: %w", err)
+	}
+	if memberSeriesID != seriesID {
+		return fmt.Errorf("playlist series does not belong to series")
+	}
+
+	if _, err := tx.Exec(ctx, `INSERT INTO playlist_series_progress
+		(id, playlist_series_id, next_episode_id, next_position, last_watched_episode_id, updated_at)
+		VALUES (gen_random_uuid(), $1, $2, $3, NULL, now())
+		ON CONFLICT (playlist_series_id) DO UPDATE SET
+		  next_episode_id = EXCLUDED.next_episode_id, next_position = EXCLUDED.next_position,
+		  last_watched_episode_id = NULL, updated_at = now()`, playlistSeriesID, episodeID, position); err != nil {
+		return fmt.Errorf("reset playlist progression: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM playlist_series_history h
+		USING episodes e
+		WHERE h.episode_id = e.id AND h.playlist_series_id = $1
+		  AND e.series_id = $2 AND e.absolute_order >= $3`, playlistSeriesID, seriesID, position); err != nil {
+		return fmt.Errorf("trim playlist history: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM playlist_queue_items
+		WHERE playlist_id = $1 AND series_id = $2 AND status IN ('pending', 'pushed', 'watching')`, playlistID, seriesID); err != nil {
+		return fmt.Errorf("invalidate playlist queue: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit serial progress reset: %w", err)
+	}
+	return nil
+}
+
 func (r *PlaylistRepo) MarkSeriesSeen(ctx context.Context, playlistSeriesID string) error {
 	_, err := r.pool.Exec(ctx,
 		`UPDATE playlist_series SET last_seen_at = now() WHERE id = $1`, playlistSeriesID)

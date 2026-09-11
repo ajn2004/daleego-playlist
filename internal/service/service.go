@@ -141,6 +141,7 @@ func (s *Service) importSeries(ctx context.Context, server *repository.MediaServ
 			series := &repository.Series{
 				ID:             uuid.New().String(),
 				MediaServerID:  server.ID,
+				ServerGUID:     ms.GUID,
 				ServerSeriesID: ms.ID,
 				LibraryID:      lib.ID,
 				Title:          ms.Title,
@@ -723,6 +724,7 @@ func (s *Service) SyncAll(ctx context.Context) error {
 				series := &repository.Series{
 					ID:             uuid.New().String(),
 					MediaServerID:  server.ID,
+					ServerGUID:     ms.GUID,
 					ServerSeriesID: ms.ID,
 					LibraryID:      lib.ID,
 					Title:          ms.Title,
@@ -1688,20 +1690,16 @@ func (s *Service) SetPlaylistNextEpisode(ctx context.Context, playlistID, series
 		return fmt.Errorf("episode is excluded by this show's profile")
 	}
 
-	progress := &repository.PlaylistProgress{
-		ID:               uuid.New().String(),
-		PlaylistSeriesID: member.ID,
-		NextEpisodeID:    &episodeID,
-		NextPosition:     &ep.AbsoluteOrder,
+	if err := s.playlistRepo.ResetSerialProgress(ctx, playlistID, member.ID, seriesID, episodeID, ep.AbsoluteOrder); err != nil {
+		return fmt.Errorf("reset cursor: %w", err)
 	}
-	if err := s.playlistRepo.UpsertProgress(ctx, progress); err != nil {
-		return fmt.Errorf("update cursor: %w", err)
+	_, fillErr := s.fillPlaylist(ctx, playlistID)
+	if err := s.publishPlaylistProjection(ctx, playlistID); err != nil {
+		return fmt.Errorf("publish after cursor reset: %w", err)
 	}
-
-	if err := s.playlistRepo.SkipPendingForSeries(ctx, playlistID, seriesID); err != nil {
-		return fmt.Errorf("skip pending queue items: %w", err)
+	if fillErr != nil {
+		return fmt.Errorf("refill after cursor reset: %w", fillErr)
 	}
-
 	return nil
 }
 

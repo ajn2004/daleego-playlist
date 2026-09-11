@@ -85,7 +85,7 @@ func New(ctx context.Context, cfg *config.Config) (*Server, error) {
 			return discoverPlexShows(ctx, plexClient, serverRepo, cursor)
 		}),
 		discovery.CatalogFunc(func(ctx context.Context, show discovery.Show) (bool, error) {
-			return seriesRepo.UpsertDiscovered(ctx, &repository.Series{ID: uuid.New().String(), MediaServerID: show.ServerID, ServerSeriesID: show.ServerShowID, LibraryID: show.LibraryID, Title: show.Title})
+			return seriesRepo.UpsertDiscovered(ctx, &repository.Series{ID: uuid.New().String(), MediaServerID: show.ServerID, ServerGUID: show.GUID, ServerSeriesID: show.ServerShowID, LibraryID: show.LibraryID, Title: show.Title})
 		}), discoveryRepo, slog.Default())
 
 	s.router = s.buildRouter()
@@ -269,7 +269,7 @@ func discoverPlexShows(ctx context.Context, client *plex.Client, servers *reposi
 			return discovery.Response{}, err
 		}
 		for _, item := range items {
-			shows = append(shows, discovery.Show{ServerID: server.ID, ServerShowID: item.ID, LibraryID: library.ID, Title: item.Title})
+			shows = append(shows, discovery.Show{ServerID: server.ID, ServerShowID: item.ID, GUID: item.GUID, LibraryID: library.ID, Title: item.Title})
 		}
 	}
 	return discovery.Response{Shows: shows, NextCursor: time.Now().UTC().Format(time.RFC3339Nano)}, nil
