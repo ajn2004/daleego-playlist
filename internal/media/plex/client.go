@@ -30,6 +30,16 @@ type MediaContainer struct {
 	Playlist  []PlaylistXML `xml:"Playlist"`
 }
 
+type pagedMediaContainer struct {
+	XMLName   xml.Name      `xml:"MediaContainer"`
+	Size      *int          `xml:"size,attr"`
+	Offset    *int          `xml:"offset,attr"`
+	TotalSize *int          `xml:"totalSize,attr"`
+	Directory []Directory   `xml:"Directory"`
+	Video     []Video       `xml:"Video"`
+	Playlist  []PlaylistXML `xml:"Playlist"`
+}
+
 // PublicationMismatchError means Plex accepted a write but its committed
 // playlist projection does not match the requested projection.
 type PublicationMismatchError struct {
@@ -137,6 +147,10 @@ func NewClient(baseURL, token string, timeout time.Duration) *Client {
 }
 
 func (c *Client) doRequest(ctx context.Context, path string, queryParams map[string]string) (*http.Response, error) {
+	return c.doRequestWithHeaders(ctx, path, queryParams, nil)
+}
+
+func (c *Client) doRequestWithHeaders(ctx context.Context, path string, queryParams map[string]string, headers map[string]string) (*http.Response, error) {
 	u, err := url.Parse(c.baseURL + path)
 	if err != nil {
 		return nil, fmt.Errorf("parse url: %w", err)
@@ -154,6 +168,9 @@ func (c *Client) doRequest(ctx context.Context, path string, queryParams map[str
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Accept", "application/xml")
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -295,23 +312,37 @@ func (c *Client) ListLibraries(ctx context.Context) ([]media.Library, error) {
 }
 
 func (c *Client) ListSeries(ctx context.Context, libraryID string) ([]media.SeriesMetadata, error) {
-	resp, err := c.doRequest(ctx, fmt.Sprintf("/library/sections/%s/all", libraryID), nil)
-	if err != nil {
-		return nil, fmt.Errorf("list series: %w", err)
+	const pageSize = 100
+	allDirectories := make([]Directory, 0)
+	seenIDs := make(map[string]struct{})
+	for page := 0; page < maxPlexPages; page++ {
+		offset := len(allDirectories)
+		container, paginated, err := c.getPagedContainer(ctx, fmt.Sprintf("/library/sections/%s/all", libraryID), offset, pageSize)
+		if err != nil {
+			return nil, fmt.Errorf("list series: %w", err)
+		}
+		for _, directory := range container.Directory {
+			if directory.RatingKey == "" {
+				return nil, fmt.Errorf("list series: series has no rating key")
+			}
+			if _, exists := seenIDs[directory.RatingKey]; exists {
+				return nil, fmt.Errorf("list series: duplicate series rating key %q", directory.RatingKey)
+			}
+			seenIDs[directory.RatingKey] = struct{}{}
+			allDirectories = append(allDirectories, directory)
+		}
+		if done, err := paginationDone(container, paginated, offset, len(container.Directory), len(allDirectories)); err != nil {
+			return nil, fmt.Errorf("list series: %w", err)
+		} else if done {
+			break
+		}
+		if page == maxPlexPages-1 {
+			return nil, fmt.Errorf("list series exceeded pagination limit")
+		}
 	}
-	defer resp.Body.Close()
 
-	var container struct {
-		XMLName   xml.Name    `xml:"MediaContainer"`
-		Directory []Directory `xml:"Directory"`
-		Video     []Video     `xml:"Video"`
-	}
-	if err := xml.NewDecoder(resp.Body).Decode(&container); err != nil {
-		return nil, fmt.Errorf("decode series: %w", err)
-	}
-
-	series := make([]media.SeriesMetadata, 0, len(container.Directory))
-	for _, d := range container.Directory {
+	series := make([]media.SeriesMetadata, 0, len(allDirectories))
+	for _, d := range allDirectories {
 		if d.Type != "show" {
 			continue
 		}
@@ -331,25 +362,29 @@ func (c *Client) ListSeries(ctx context.Context, libraryID string) ([]media.Seri
 func (c *Client) ListEpisodes(ctx context.Context, seriesID string) ([]media.EpisodeMetadata, error) {
 	const pageSize = 100
 	allVideos := make([]Video, 0)
-	for page := 0; page < 1000; page++ {
-		resp, err := c.doRequest(ctx, fmt.Sprintf("/library/metadata/%s/allLeaves", seriesID), map[string]string{"offset": strconv.Itoa(len(allVideos)), "size": strconv.Itoa(pageSize)})
+	seenIDs := make(map[string]struct{})
+	for page := 0; page < maxPlexPages; page++ {
+		offset := len(allVideos)
+		container, paginated, err := c.getPagedContainer(ctx, fmt.Sprintf("/library/metadata/%s/allLeaves", seriesID), offset, pageSize)
 		if err != nil {
 			return nil, fmt.Errorf("list episodes: %w", err)
 		}
-		var container MediaContainer
-		decodeErr := xml.NewDecoder(resp.Body).Decode(&container)
-		resp.Body.Close()
-		if decodeErr != nil {
-			return nil, fmt.Errorf("decode episodes: %w", decodeErr)
+		for _, video := range container.Video {
+			if video.RatingKey == "" {
+				return nil, fmt.Errorf("list episodes: episode has no rating key")
+			}
+			if _, exists := seenIDs[video.RatingKey]; exists {
+				return nil, fmt.Errorf("list episodes: duplicate episode rating key %q", video.RatingKey)
+			}
+			seenIDs[video.RatingKey] = struct{}{}
+			allVideos = append(allVideos, video)
 		}
-		if container.TotalSize == 0 && len(container.Video) == pageSize && container.Offset != len(allVideos) {
-			return nil, fmt.Errorf("list episodes response is paginated without a reliable offset or totalSize")
-		}
-		allVideos = append(allVideos, container.Video...)
-		if (container.TotalSize > 0 && len(allVideos) >= container.TotalSize) || len(container.Video) < pageSize || len(container.Video) == 0 {
+		if done, err := paginationDone(container, paginated, offset, len(container.Video), len(allVideos)); err != nil {
+			return nil, fmt.Errorf("list episodes: %w", err)
+		} else if done {
 			break
 		}
-		if page == 999 {
+		if page == maxPlexPages-1 {
 			return nil, fmt.Errorf("list episodes exceeded pagination limit")
 		}
 	}
@@ -421,24 +456,12 @@ func (c *Client) GetEpisodeProgress(ctx context.Context, episodeIDs []string) ([
 
 func (c *Client) ListPlaylistItems(ctx context.Context, playlistID string) ([]media.PlaylistItem, error) {
 	const pageSize = 100
-	const maxPages = 1000
 	items := make([]media.PlaylistItem, 0)
-	for page := 0; page < maxPages; page++ {
+	for page := 0; page < maxPlexPages; page++ {
 		offset := len(items)
-		resp, err := c.doRequest(ctx, fmt.Sprintf("/playlists/%s/items", playlistID), map[string]string{
-			"offset": strconv.Itoa(offset), "size": strconv.Itoa(pageSize),
-		})
+		container, paginated, err := c.getPagedContainer(ctx, fmt.Sprintf("/playlists/%s/items", playlistID), offset, pageSize)
 		if err != nil {
 			return nil, fmt.Errorf("list playlist items page offset %d: %w", offset, err)
-		}
-		var container MediaContainer
-		decodeErr := xml.NewDecoder(resp.Body).Decode(&container)
-		resp.Body.Close()
-		if decodeErr != nil {
-			return nil, fmt.Errorf("decode playlist items page offset %d: %w", offset, decodeErr)
-		}
-		if container.TotalSize > 0 && container.Offset != offset {
-			return nil, fmt.Errorf("playlist pagination returned offset %d for requested offset %d", container.Offset, offset)
 		}
 		for _, v := range container.Video {
 			if v.RatingKey == "" {
@@ -447,17 +470,74 @@ func (c *Client) ListPlaylistItems(ctx context.Context, playlistID string) ([]me
 			items = append(items, media.PlaylistItem{EpisodeID: v.RatingKey, SeriesTitle: v.GrandparentTitle, EpisodeTitle: v.Title, SeasonNumber: v.ParentIndex, EpisodeNumber: v.Index})
 		}
 
-		returned := len(container.Video)
-		total := container.TotalSize
-		if total > 0 {
-			if len(items) >= total || returned == 0 {
-				return items, nil
-			}
-		} else if returned < pageSize || returned == 0 {
+		if done, err := paginationDone(container, paginated, offset, len(container.Video), len(items)); err != nil {
+			return nil, fmt.Errorf("list playlist items page offset %d: %w", offset, err)
+		} else if done {
 			return items, nil
 		}
 	}
 	return nil, fmt.Errorf("list playlist items exceeded pagination limit")
+}
+
+const maxPlexPages = 1000
+
+func (c *Client) getPagedContainer(ctx context.Context, path string, offset, pageSize int) (pagedMediaContainer, bool, error) {
+	resp, err := c.doRequestWithHeaders(ctx, path, nil, map[string]string{
+		"X-Plex-Container-Start": strconv.Itoa(offset),
+		"X-Plex-Container-Size":  strconv.Itoa(pageSize),
+	})
+	if err != nil {
+		return pagedMediaContainer{}, false, err
+	}
+	defer resp.Body.Close()
+	var container pagedMediaContainer
+	if err := xml.NewDecoder(resp.Body).Decode(&container); err != nil {
+		return pagedMediaContainer{}, false, fmt.Errorf("decode response: %w", err)
+	}
+	responsePagination := false
+	for header, target := range map[string]**int{
+		"X-Plex-Container-Start":      &container.Offset,
+		"X-Plex-Container-Size":       &container.Size,
+		"X-Plex-Container-Total-Size": &container.TotalSize,
+	} {
+		if targetValue := resp.Header.Get(header); targetValue != "" {
+			value, parseErr := strconv.Atoi(targetValue)
+			if parseErr != nil || value < 0 {
+				return pagedMediaContainer{}, false, fmt.Errorf("invalid %s response header %q", header, targetValue)
+			}
+			if *target == nil {
+				*target = &value
+			}
+			responsePagination = true
+		}
+	}
+	return container, responsePagination || container.Offset != nil || container.TotalSize != nil, nil
+}
+
+func paginationDone(container pagedMediaContainer, paginated bool, requestedOffset, returned, collected int) (bool, error) {
+	if !paginated {
+		return true, nil
+	}
+	if container.Offset != nil {
+		if *container.Offset != requestedOffset {
+			return false, fmt.Errorf("pagination returned offset %d for requested offset %d", *container.Offset, requestedOffset)
+		}
+	} else if requestedOffset != 0 {
+		return false, fmt.Errorf("pagination response omitted offset for requested offset %d", requestedOffset)
+	}
+	if container.TotalSize != nil {
+		if *container.TotalSize < collected {
+			return false, fmt.Errorf("pagination total size %d is less than collected %d", *container.TotalSize, collected)
+		}
+		if returned == 0 && collected < *container.TotalSize {
+			return false, fmt.Errorf("pagination ended at %d of declared %d items", collected, *container.TotalSize)
+		}
+		return collected == *container.TotalSize, nil
+	}
+	if returned == 0 || returned < 100 {
+		return true, nil
+	}
+	return false, nil
 }
 
 func (c *Client) ClearPlaylistItems(ctx context.Context, playlistID string) error {

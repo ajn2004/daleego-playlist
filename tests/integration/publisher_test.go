@@ -39,11 +39,15 @@ func TestProductionPublisherRejectsAcceptedShortWrite(t *testing.T) {
 func TestProductionPlaylistReaderCollectsAllPages(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/xml")
-		if r.URL.Query().Get("offset") == "0" {
-			fmt.Fprint(w, `<MediaContainer offset="0" size="8" totalSize="10"><Video ratingKey="1"/><Video ratingKey="2"/><Video ratingKey="3"/><Video ratingKey="4"/><Video ratingKey="5"/><Video ratingKey="6"/><Video ratingKey="7"/><Video ratingKey="8"/></MediaContainer>`)
+		if r.Header.Get("X-Plex-Container-Start") == "0" {
+			w.Header().Set("X-Plex-Container-Start", "0")
+			w.Header().Set("X-Plex-Container-Total-Size", "10")
+			fmt.Fprint(w, `<MediaContainer><Video ratingKey="1"/><Video ratingKey="2"/><Video ratingKey="3"/><Video ratingKey="4"/><Video ratingKey="5"/><Video ratingKey="6"/><Video ratingKey="7"/><Video ratingKey="8"/></MediaContainer>`)
 			return
 		}
-		fmt.Fprint(w, `<MediaContainer offset="8" size="2" totalSize="10"><Video ratingKey="9"/><Video ratingKey="10"/></MediaContainer>`)
+		w.Header().Set("X-Plex-Container-Start", "8")
+		w.Header().Set("X-Plex-Container-Total-Size", "10")
+		fmt.Fprint(w, `<MediaContainer><Video ratingKey="9"/><Video ratingKey="10"/></MediaContainer>`)
 	}))
 	defer server.Close()
 	items, err := plex.NewClient(server.URL, "test-token", 5*time.Second).ListPlaylistItems(context.Background(), "1")

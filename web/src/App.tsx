@@ -358,13 +358,17 @@ function PlaylistEditor({
       const retained = plexItems.map(item => item.queue_item_id).filter(Boolean)
       const retainedSet = new Set(retained)
       const removed = plexSnapshotIDs.filter(id => !retainedSet.has(id))
-      await api.playlists.replacePlexItems(playlist.id, {
+      const state = await api.playlists.replacePlexItems(playlist.id, {
         base_revision: plexBaseRevision,
         ordered_queue_item_ids: retained,
         removed_queue_item_ids: removed,
       })
+      setPlexItems(state.items)
+      setPlexBaseRevision(state.base_revision)
+      setPlexActualCount(state.items.length)
+      setPlexSnapshotIDs(state.items.map(item => item.queue_item_id).filter(Boolean))
+      setPlexLoaded(true)
       await loadDetail()
-      await loadPlexItems()
       onStatus('Playlist order saved; explicit removals were consumed and the queue was refilled')
     } catch (e: any) {
       onStatus('Plex playlist save failed: ' + e.message)
@@ -460,8 +464,9 @@ function PlaylistEditor({
     setNextEpisodePick(episodeID)
     setSavingNext(true)
     try {
-      await api.playlists.setCursor(playlist.id, seriesID, episodeID)
-      await loadDetail()
+      const updated = await api.playlists.setCursor(playlist.id, seriesID, episodeID)
+      setDetail(updated)
+      await loadPlexItems()
       onUpdate()
       setSettingNextFor(null)
       onStatus('Next episode updated')

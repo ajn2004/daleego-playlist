@@ -1,12 +1,27 @@
 package service
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/andrew/rotator/internal/media"
 	"github.com/andrew/rotator/internal/repository"
 )
+
+func TestPlaylistLockWaiterHonorsCancellation(t *testing.T) {
+	lock := newPlaylistLock()
+	if err := lock.acquire(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer lock.release()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := lock.acquire(ctx); err == nil {
+		t.Fatal("expected canceled waiter to return without acquiring the lock")
+	}
+}
 
 func TestNewlyViewedAfterIgnoresHistoricalPlexView(t *testing.T) {
 	queuedAt := time.Unix(1700000100, 0)
@@ -221,6 +236,39 @@ func TestFirstUnqueuedEpisodeAtCursorSkipsConsumedHistory(t *testing.T) {
 	)
 	if !ok || got.ID != "e6" {
 		t.Fatalf("expected consumed future episode e5 to be skipped, got %#v", got)
+	}
+}
+
+func TestNextAllowedEpisodeAfterSkipsHistoryAndUnavailable(t *testing.T) {
+	episodes := []repository.Episode{
+		{ID: "e1", AbsoluteOrder: 1},
+		{ID: "e2", AbsoluteOrder: 2},
+		{ID: "e3", AbsoluteOrder: 3, Unavailable: true},
+		{ID: "e4", AbsoluteOrder: 4},
+	}
+
+	got, ok := nextAllowedEpisodeAfter(episodes, "e1", ShowProfileRules{DefaultAllow: true}, map[string]bool{"e2": true})
+	if !ok || got.ID != "e4" {
+		t.Fatalf("expected e4 after skipping consumed e2 and unavailable e3, got %#v", got)
+	}
+}
+
+func TestNextAllowedEpisodeAfterRequiresCurrentEpisode(t *testing.T) {
+	episodes := []repository.Episode{{ID: "e1"}, {ID: "e2"}}
+	if _, ok := nextAllowedEpisodeAfter(episodes, "missing", ShowProfileRules{DefaultAllow: true}, nil); ok {
+		t.Fatal("must not advance when current episode is absent")
+	}
+}
+
+func TestRemovedQueueItemsInOrderUsesActiveQueueOrder(t *testing.T) {
+	active := []repository.PlaylistQueueItem{
+		{ID: "e1"}, {ID: "e2"}, {ID: "e3"}, {ID: "e4"},
+	}
+	removed := map[string]bool{"e2": true, "e1": true}
+
+	got := removedQueueItemsInOrder(active, removed)
+	if len(got) != 2 || got[0].ID != "e1" || got[1].ID != "e2" {
+		t.Fatalf("removed items were not returned in queue order: %#v", got)
 	}
 }
 

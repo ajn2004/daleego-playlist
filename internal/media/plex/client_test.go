@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -291,13 +293,20 @@ func TestListPlaylistItems(t *testing.T) {
 
 func TestListPlaylistItemsCollectsPaginatedResults(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		offset := r.URL.Query().Get("offset")
+		offset := r.Header.Get("X-Plex-Container-Start")
+		if r.URL.Query().Get("offset") != "" || r.URL.Query().Get("size") != "" {
+			t.Errorf("pagination must use Plex headers, got query %s", r.URL.RawQuery)
+		}
 		w.Header().Set("Content-Type", "application/xml")
 		switch offset {
 		case "0":
-			_, _ = w.Write([]byte(`<MediaContainer offset="0" size="8" totalSize="10"><Video ratingKey="1"/><Video ratingKey="2"/><Video ratingKey="3"/><Video ratingKey="4"/><Video ratingKey="5"/><Video ratingKey="6"/><Video ratingKey="7"/><Video ratingKey="8"/></MediaContainer>`))
+			w.Header().Set("X-Plex-Container-Start", "0")
+			w.Header().Set("X-Plex-Container-Total-Size", "10")
+			_, _ = w.Write([]byte(`<MediaContainer><Video ratingKey="1"/><Video ratingKey="2"/><Video ratingKey="3"/><Video ratingKey="4"/><Video ratingKey="5"/><Video ratingKey="6"/><Video ratingKey="7"/><Video ratingKey="8"/></MediaContainer>`))
 		case "8":
-			_, _ = w.Write([]byte(`<MediaContainer offset="8" size="2" totalSize="10"><Video ratingKey="9"/><Video ratingKey="10"/></MediaContainer>`))
+			w.Header().Set("X-Plex-Container-Start", "8")
+			w.Header().Set("X-Plex-Container-Total-Size", "10")
+			_, _ = w.Write([]byte(`<MediaContainer><Video ratingKey="9"/><Video ratingKey="10"/></MediaContainer>`))
 		default:
 			t.Errorf("unexpected offset %q", offset)
 		}
@@ -355,6 +364,132 @@ func TestListEpisodesWithDates(t *testing.T) {
 	}
 	if episodes[1].AirDate != "" {
 		t.Errorf("expected empty air date for episode without originallyAvailableAt, got %q", episodes[1].AirDate)
+	}
+}
+
+func episodePageXML(start, end int) string {
+	var b strings.Builder
+	b.WriteString("<MediaContainer>")
+	for i := start; i < end; i++ {
+		b.WriteString(`<Video ratingKey="`)
+		b.WriteString(strconv.Itoa(i))
+		b.WriteString(`" title="Episode `)
+		b.WriteString(strconv.Itoa(i))
+		b.WriteString(`"/>`)
+	}
+	b.WriteString("</MediaContainer>")
+	return b.String()
+}
+
+func TestListEpisodesConsumesLargeUnpaginatedResponseOnce(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte(episodePageXML(1, 174)))
+	}))
+	defer server.Close()
+
+	episodes, err := NewClient(server.URL, "test-token", time.Second).ListEpisodes(context.Background(), "10")
+	if err != nil {
+		t.Fatalf("ListEpisodes failed: %v", err)
+	}
+	if len(episodes) != 173 || requests != 1 {
+		t.Fatalf("got %d episodes in %d requests, want 173 in 1", len(episodes), requests)
+	}
+}
+
+func TestListEpisodesUsesHeaderPagination(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		start, err := strconv.Atoi(r.Header.Get("X-Plex-Container-Start"))
+		if err != nil || start != (requests-1)*100 {
+			t.Errorf("request %d start = %q", requests, r.Header.Get("X-Plex-Container-Start"))
+		}
+		w.Header().Set("Content-Type", "application/xml")
+		w.Header().Set("X-Plex-Container-Start", strconv.Itoa(start))
+		w.Header().Set("X-Plex-Container-Total-Size", "247")
+		end := start + 100
+		if end > 247 {
+			end = 247
+		}
+		_, _ = w.Write([]byte(episodePageXML(start+1, end+1)))
+	}))
+	defer server.Close()
+
+	episodes, err := NewClient(server.URL, "test-token", time.Second).ListEpisodes(context.Background(), "10")
+	if err != nil {
+		t.Fatalf("ListEpisodes failed: %v", err)
+	}
+	if len(episodes) != 247 || requests != 3 {
+		t.Fatalf("got %d episodes in %d requests, want 247 in 3", len(episodes), requests)
+	}
+	for i, episode := range episodes {
+		if episode.ID != strconv.Itoa(i+1) {
+			t.Fatalf("episode %d has ID %q", i, episode.ID)
+		}
+	}
+}
+
+func TestListEpisodesRejectsRepeatedPage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		w.Header().Set("X-Plex-Container-Start", "0")
+		w.Header().Set("X-Plex-Container-Total-Size", "173")
+		_, _ = w.Write([]byte(episodePageXML(1, 101)))
+	}))
+	defer server.Close()
+
+	if _, err := NewClient(server.URL, "test-token", time.Second).ListEpisodes(context.Background(), "10"); err == nil {
+		t.Fatal("expected repeated page error")
+	}
+}
+
+func TestListEpisodesRejectsEmptyPageBeforeDeclaredEnd(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/xml")
+		w.Header().Set("X-Plex-Container-Start", r.Header.Get("X-Plex-Container-Start"))
+		w.Header().Set("X-Plex-Container-Total-Size", "173")
+		if requests == 1 {
+			_, _ = w.Write([]byte(episodePageXML(1, 101)))
+			return
+		}
+		_, _ = w.Write([]byte(`<MediaContainer/>`))
+	}))
+	defer server.Close()
+
+	if _, err := NewClient(server.URL, "test-token", time.Second).ListEpisodes(context.Background(), "10"); err == nil {
+		t.Fatal("expected incomplete pagination error")
+	}
+}
+
+func TestListEpisodesCancellationStopsRequest(t *testing.T) {
+	started := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := NewClient(server.URL, "test-token", 10*time.Second).ListEpisodes(ctx, "10")
+		done <- err
+	}()
+	<-started
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected cancellation error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled request did not return promptly")
 	}
 }
 

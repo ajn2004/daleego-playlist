@@ -669,6 +669,16 @@ func (r *PlaylistRepo) ReorderActiveQueueItems(ctx context.Context, playlistID s
 	return tx.Commit(ctx)
 }
 
+func (r *PlaylistRepo) PruneInactiveQueueItems(ctx context.Context, playlistID string) error {
+	_, err := r.pool.Exec(ctx,
+		`DELETE FROM playlist_queue_items
+		 WHERE playlist_id = $1 AND status IN ('watched', 'skipped')`, playlistID)
+	if err != nil {
+		return fmt.Errorf("prune inactive queue items: %w", err)
+	}
+	return nil
+}
+
 func (r *PlaylistRepo) ClearQueue(ctx context.Context, playlistID string) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
