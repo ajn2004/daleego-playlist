@@ -504,11 +504,13 @@ function PlaylistEditor({
     try {
       const res = await api.playlists.fill(playlist.id)
       await loadDetail()
-      const q = res.queued ?? 0
-      if (q > 0) {
-        onStatus(`Queued ${q} episode(s)`)
+      const added = res.added_count ?? 0
+      if (res.reason === 'already_full') {
+        onStatus(`Queue is already full: ${res.active_count}/${res.target_count}.`)
+      } else if (added > 0) {
+        onStatus(`Added ${added} episode(s); queue is ${res.active_count}/${res.target_count}.`)
       } else {
-        onStatus('No eligible episodes to queue — add series with imported episodes first')
+        onStatus(`Fill added no episodes; queue is ${res.active_count}/${res.target_count}.`)
       }
     } catch (e: any) {
       onStatus('Fill failed: ' + e.message)
@@ -538,7 +540,13 @@ function PlaylistEditor({
       const res = await api.playlists.refill(playlist.id)
       await loadDetail()
       await loadPlexItems()
-      onStatus(res.queued > 0 ? `Rebuilt and published ${res.queued} episode(s)` : 'Queue cleared; no eligible episodes were available')
+      if (res.publication_status === 'failed') {
+        onStatus(`Queue rebuilt locally; Plex publication failed.`)
+      } else if (res.shortfall > 0) {
+        onStatus(`Rebuilt ${res.active_count}/${res.target_count} episodes; ${res.shortfall} slots could not be filled.`)
+      } else {
+        onStatus(`Rebuilt and published ${res.active_count} episodes.`)
+      }
     } catch (e: any) {
       onStatus('Refill failed: ' + e.message)
     }
@@ -568,7 +576,7 @@ function PlaylistEditor({
       const res = await api.playlists.sync(playlist.id)
       await loadDetail()
       const w = (res as any).watched ?? 0
-      const q = (res as any).queued ?? 0
+       const q = res.added_count ?? 0
       const parts: string[] = []
       if (w > 0) parts.push(`Synced ${w} watched episode(s)`)
       if (q > 0) parts.push(`Queued ${q} new episode(s)`)

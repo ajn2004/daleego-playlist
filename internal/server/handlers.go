@@ -424,12 +424,12 @@ func (s *Server) handleSetPlaylistSlots(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) handleFillPlaylist(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	queued, err := s.svc.FillPlaylist(r.Context(), id)
+	result, err := s.svc.FillPlaylist(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "fill_failed", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"queued": queued})
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) handleClearPlaylist(w http.ResponseWriter, r *http.Request) {
@@ -441,12 +441,17 @@ func (s *Server) handleClearPlaylist(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRefillPlaylist(w http.ResponseWriter, r *http.Request) {
-	queued, err := s.svc.RefillPlaylist(r.Context(), r.PathValue("id"))
+	result, err := s.svc.RefillPlaylist(r.Context(), r.PathValue("id"))
+	var publicationErr *service.PlaylistPublicationError
+	if errors.As(err, &publicationErr) {
+		writeJSON(w, http.StatusOK, publicationErr.Result)
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "refill_failed", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"status": "refilled", "queued": queued})
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) handlePublishPlaylist(w http.ResponseWriter, r *http.Request) {
@@ -470,7 +475,7 @@ func (s *Server) handleSyncPlaylist(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "sync_failed", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"status": "synced", "watched": watched, "queued": queued})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"status": "synced", "watched": watched, "added_count": queued})
 }
 
 func (s *Server) handleGetPlexPlaylist(w http.ResponseWriter, r *http.Request) {

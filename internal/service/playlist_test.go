@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -301,5 +302,22 @@ func TestRemainingDurationStartsAtCursorAndRespectsProfile(t *testing.T) {
 	got := remainingDuration(episodes, 2, rules)
 	if got != 1500 {
 		t.Fatalf("remaining duration = %d, want 1500", got)
+	}
+}
+
+func TestQueueShortfallIncludesEvaluationReasons(t *testing.T) {
+	err := (&QueueShortfallError{Target: 10, Active: 0, Reasons: []string{"series_complete", "profile_excluded"}}).Error()
+	if !strings.Contains(err, "series_complete") || !strings.Contains(err, "profile_excluded") {
+		t.Fatalf("shortfall error = %q, want evaluation reasons", err)
+	}
+}
+
+func TestQueueItemsNotInDoesNotTreatExistingQueueAsNew(t *testing.T) {
+	existing := []repository.PlaylistQueueItem{{ID: "old", EpisodeID: "episode-old"}}
+	planned := append(existing, repository.PlaylistQueueItem{ID: "new", EpisodeID: "episode-new"})
+
+	got := queueItemsNotIn(itemIDs(existing), planned)
+	if len(got) != 1 || got[0].ID != "new" {
+		t.Fatalf("new queue items = %#v, want only replacement addition", got)
 	}
 }

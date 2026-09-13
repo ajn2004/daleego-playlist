@@ -2,7 +2,9 @@ package repository
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -543,6 +545,58 @@ func (r *PlaylistRepo) AddQueueItem(ctx context.Context, item *PlaylistQueueItem
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())`,
 		item.ID, item.PlaylistID, item.CycleIndex, item.SlotPosition, item.SlotType, item.SeriesID, item.PlaylistSeriesID, item.EpisodeID, item.Position, item.Score, item.Status)
 	return err
+}
+
+// ReplaceQueue verifies the caller's snapshot and replaces the queue and its
+// cursor in one transaction. History and playlist-series progress are kept.
+func (r *PlaylistRepo) ReplaceQueue(ctx context.Context, playlistID, expectedRevision string, items []PlaylistQueueItem, cycleCursor int) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin replace queue transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, `SELECT id FROM playlists WHERE id = $1 FOR UPDATE`, playlistID); err != nil {
+		return fmt.Errorf("lock playlist: %w", err)
+	}
+	rows, err := tx.Query(ctx, `SELECT id, position, episode_id, status FROM playlist_queue_items WHERE playlist_id = $1 ORDER BY position`, playlistID)
+	if err != nil {
+		return fmt.Errorf("read queue revision: %w", err)
+	}
+	var revision strings.Builder
+	for rows.Next() {
+		var id, episodeID, status string
+		var position int
+		if err := rows.Scan(&id, &position, &episodeID, &status); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan queue revision: %w", err)
+		}
+		fmt.Fprintf(&revision, "%s:%d:%s:%s|", id, position, episodeID, status)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate queue revision: %w", err)
+	}
+	rows.Close()
+	actualRevision := fmt.Sprintf("%x", sha256.Sum256([]byte(revision.String())))
+	if actualRevision != expectedRevision {
+		return fmt.Errorf("queue changed while planning: expected revision %s, actual revision %s", expectedRevision, actualRevision)
+	}
+
+	if _, err := tx.Exec(ctx, `DELETE FROM playlist_queue_items WHERE playlist_id = $1`, playlistID); err != nil {
+		return fmt.Errorf("delete replaced queue: %w", err)
+	}
+	for _, item := range items {
+		if _, err := tx.Exec(ctx, `INSERT INTO playlist_queue_items (id, playlist_id, cycle_index, slot_position, slot_type, series_id, playlist_series_id, episode_id, position, score, status, created_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())`,
+			item.ID, item.PlaylistID, item.CycleIndex, item.SlotPosition, item.SlotType, item.SeriesID, item.PlaylistSeriesID, item.EpisodeID, item.Position, item.Score, item.Status); err != nil {
+			return fmt.Errorf("insert replacement queue item: %w", err)
+		}
+	}
+	if _, err := tx.Exec(ctx, `UPDATE playlists SET cycle_cursor = $2, updated_at = now() WHERE id = $1`, playlistID, cycleCursor); err != nil {
+		return fmt.Errorf("update replacement cursor: %w", err)
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *PlaylistRepo) CountPendingQueueItems(ctx context.Context, playlistID string) (int, error) {

@@ -111,6 +111,18 @@ export interface Playlist {
 	 revision: string
 }
 
+export interface PlaylistOperationResult {
+  operation: 'fill' | 'rebuild'
+  rebuilt?: boolean
+  added_count?: number
+  active_count: number
+  target_count: number
+  shortfall: number
+  reason?: string
+  publication_status: 'published' | 'failed' | 'not_published'
+  reasons?: string[]
+}
+
 export interface PlaylistSeries {
   id: string
   series_id: string

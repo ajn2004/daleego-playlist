@@ -107,15 +107,15 @@ export const api = {
         body: JSON.stringify({ slots }),
       }),
     fill: (id: string) =>
-      request<{ queued: number }>(`/api/v1/playlists/${id}/fill`, { method: 'POST' }),
+      request<import('../types').PlaylistOperationResult>(`/api/v1/playlists/${id}/fill`, { method: 'POST' }),
     clear: (id: string) =>
       request<{ status: string }>(`/api/v1/playlists/${id}/clear`, { method: 'POST' }),
     refill: (id: string) =>
-      request<{ status: string; queued: number }>(`/api/v1/playlists/${id}/refill`, { method: 'POST' }),
+      request<import('../types').PlaylistOperationResult>(`/api/v1/playlists/${id}/refill`, { method: 'POST' }),
     publish: (id: string) =>
       request<{ status: string }>(`/api/v1/playlists/${id}/publish`, { method: 'POST' }),
     sync: (id: string) =>
-      request<{ status: string }>(`/api/v1/playlists/${id}/sync`, { method: 'POST' }),
+      request<{ status: string; watched: number; added_count: number }>(`/api/v1/playlists/${id}/sync`, { method: 'POST' }),
     plexItems: (id: string) =>
       request<import('../types').PlexPlaylistState>(`/api/v1/playlists/${id}/plex-items`),
     replacePlexItems: (id: string, data: { base_revision: string; ordered_queue_item_ids: string[]; removed_queue_item_ids: string[] }) =>

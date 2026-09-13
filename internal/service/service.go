@@ -935,11 +935,35 @@ type PlexPlaylistResponse struct {
 type StalePlaylistEditError struct{ Expected, Actual string }
 
 type QueueShortfallError struct {
-	Target int
-	Active int
+	Target  int
+	Active  int
+	Reasons []string
 }
 
+type PlaylistOperationResult struct {
+	Operation         string   `json:"operation"`
+	Rebuilt           bool     `json:"rebuilt,omitempty"`
+	AddedCount        int      `json:"added_count,omitempty"`
+	ActiveCount       int      `json:"active_count"`
+	TargetCount       int      `json:"target_count"`
+	Shortfall         int      `json:"shortfall"`
+	Reason            string   `json:"reason,omitempty"`
+	PublicationStatus string   `json:"publication_status"`
+	Reasons           []string `json:"reasons,omitempty"`
+}
+
+type PlaylistPublicationError struct {
+	Result *PlaylistOperationResult
+	Err    error
+}
+
+func (e *PlaylistPublicationError) Error() string { return e.Err.Error() }
+func (e *PlaylistPublicationError) Unwrap() error { return e.Err }
+
 func (e *QueueShortfallError) Error() string {
+	if len(e.Reasons) > 0 {
+		return fmt.Sprintf("queue shortfall: target=%d active=%d: %s", e.Target, e.Active, strings.Join(e.Reasons, "; "))
+	}
 	return fmt.Sprintf("queue shortfall: target=%d active=%d eligible episodes could not fill the queue", e.Target, e.Active)
 }
 
@@ -1318,163 +1342,166 @@ func (s *Service) SetPlaylistSlots(ctx context.Context, playlistID string, slotT
 	return s.playlistRepo.SetSlots(ctx, playlistID, slots)
 }
 
-func (s *Service) FillPlaylist(ctx context.Context, playlistID string) (int, error) {
+func (s *Service) FillPlaylist(ctx context.Context, playlistID string) (*PlaylistOperationResult, error) {
 	lock := s.playlistLock(playlistID)
 	if err := lock.acquire(ctx); err != nil {
-		return 0, err
+		return nil, err
 	}
 	defer lock.release()
-	return s.fillPlaylist(ctx, playlistID)
+	if err := s.playlistRepo.EnsureDefaultSlot(ctx, playlistID); err != nil {
+		return nil, fmt.Errorf("ensure default slot: %w", err)
+	}
+	playlist, err := s.playlistRepo.GetByID(ctx, playlistID)
+	if err != nil {
+		return nil, err
+	}
+	existing, err := s.playlistRepo.ListQueueItems(ctx, playlistID)
+	if err != nil {
+		return nil, err
+	}
+	planned, cursor, err := s.planPlaylist(ctx, playlist, existing)
+	if err != nil {
+		return nil, err
+	}
+	newItems := queueItemsNotIn(itemIDs(existing), planned)
+	added := len(newItems)
+	for _, item := range newItems {
+		if err := s.playlistRepo.AddQueueItem(ctx, &item); err != nil {
+			return nil, err
+		}
+	}
+	if cursor != playlist.CycleCursor {
+		if err := s.playlistRepo.IncrementCursor(ctx, playlistID, cursor-playlist.CycleCursor); err != nil {
+			return nil, err
+		}
+	}
+	active := activeQueueCount(planned)
+	result := &PlaylistOperationResult{Operation: "fill", AddedCount: max(added, 0), ActiveCount: active, TargetCount: playlist.QueueTargetCount, Shortfall: max(playlist.QueueTargetCount-active, 0), PublicationStatus: "not_published"}
+	if added == 0 && active >= playlist.QueueTargetCount {
+		result.Reason = "already_full"
+	}
+	return result, nil
 }
 
 func (s *Service) fillPlaylist(ctx context.Context, playlistID string) (int, error) {
+	if err := s.playlistRepo.EnsureDefaultSlot(ctx, playlistID); err != nil {
+		return 0, fmt.Errorf("ensure default slot: %w", err)
+	}
 	playlist, err := s.playlistRepo.GetByID(ctx, playlistID)
 	if err != nil {
 		return 0, err
 	}
-
-	if err := s.playlistRepo.EnsureDefaultSlot(ctx, playlistID); err != nil {
-		slog.Warn("ensure default slot failed", "error", err)
-	}
-
-	slots, err := s.playlistRepo.ListSlots(ctx, playlistID)
+	existing, err := s.playlistRepo.ListQueueItems(ctx, playlistID)
 	if err != nil {
 		return 0, err
 	}
-	if len(slots) == 0 {
-		return 0, fmt.Errorf("no slots configured")
-	}
-
-	members, err := s.playlistRepo.ListSeries(ctx, playlistID)
+	planned, cursor, err := s.planPlaylist(ctx, playlist, existing)
 	if err != nil {
 		return 0, err
 	}
-	if len(members) == 0 {
-		return 0, fmt.Errorf("no series configured")
-	}
-
-	// Catalog synchronization is explicit. Fill only reads the locally stored
-	// catalog; a Plex omission must never implicitly change the queue.
-	queuedBefore, _ := s.playlistRepo.ListPendingQueueItems(ctx, playlistID)
-	for _, queued := range queuedBefore {
-		if ep, err := s.episodeRepo.GetByID(ctx, queued.EpisodeID); err == nil && ep.Unavailable {
-			if err := s.playlistRepo.UpdateItemStatus(ctx, queued.ID, "skipped"); err != nil {
-				return 0, err
-			}
-		}
-	}
-	pending, err := s.playlistRepo.CountPendingQueueItems(ctx, playlistID)
-	if err != nil {
-		return 0, err
-	}
-
-	need := playlist.QueueTargetCount - pending
-	if need <= 0 {
-		return 0, nil
-	}
-
-	maxPos, err := s.playlistRepo.MaxQueuePosition(ctx, playlistID)
-	if err != nil {
-		return 0, err
-	}
-
-	// Build already-queued episode set to avoid duplicates
-	existingItems, _ := s.playlistRepo.ListQueueItems(ctx, playlistID)
-	queuedEpisodes := make(map[string]bool)
-	for _, item := range existingItems {
-		if item.Status == "pending" || item.Status == "pushed" || item.Status == "watching" {
-			queuedEpisodes[item.EpisodeID] = true
-		}
-	}
-	membersByID := make(map[string]repository.PlaylistSeries, len(members))
-	for _, member := range members {
-		membersByID[member.ID] = member
-	}
-
-	inserted := 0
-	consumedSlots := 0
-	for inserted < need {
-		// A cycle is one pass over every configured slot. The queue may have
-		// more candidates after a selection, so stopping on an attempt count can
-		// incorrectly leave a target-sized queue short.
-		candidates := make([]fillCandidate, 0, len(members))
-		for _, m := range members {
-			episodeID, rating, err := s.getPlaylistEpisode(ctx, m, playlistID, queuedEpisodes)
-			if err != nil || episodeID == "" {
-				continue
-			}
-			candidates = append(candidates, fillCandidate{
-				seriesID: m.SeriesID, psID: m.ID, mode: m.Mode,
-				episodeID: episodeID, rating: rating, lastSeenAt: m.LastSeenAt,
-			})
-		}
-
-		insertedThisCycle := 0
-		for slotOffset := 0; slotOffset < len(slots) && inserted < need; slotOffset++ {
-			globalSlotPos := playlist.CycleCursor + consumedSlots
-			cycleIndex := globalSlotPos / len(slots)
-			slotPosition := globalSlotPos % len(slots)
-			slot := slots[slotPosition]
-			consumedSlots++
-
-			selected, ok := selectFillCandidate(candidates, slot.SlotType, globalSlotPos, len(members))
-			if !ok {
-				continue
-			}
-
-			pos := maxPos + inserted + 1
-			score := selected.rating
-			item := &repository.PlaylistQueueItem{
-				ID: uuid.New().String(), PlaylistID: playlistID,
-				CycleIndex: cycleIndex, SlotPosition: slotPosition, SlotType: slot.SlotType,
-				SeriesID: selected.seriesID, EpisodeID: selected.episodeID,
-				Position: pos, Score: &score, Status: "pending",
-			}
-			if selected.mode == "serial" {
-				item.PlaylistSeriesID = &selected.psID
-			}
-			if err := s.playlistRepo.AddQueueItem(ctx, item); err != nil {
-				return 0, err
-			}
-
-			queuedEpisodes[selected.episodeID] = true
-			for i, candidate := range candidates {
-				if candidate.seriesID != selected.seriesID {
-					continue
-				}
-				episodeID, rating, err := s.getPlaylistEpisode(ctx, membersByID[candidate.psID], playlistID, queuedEpisodes)
-				if err != nil || episodeID == "" {
-					candidates = append(candidates[:i], candidates[i+1:]...)
-				} else {
-					candidates[i].episodeID = episodeID
-					candidates[i].rating = rating
-				}
-				break
-			}
-			inserted++
-			insertedThisCycle++
-		}
-
-		if insertedThisCycle == 0 {
-			break
-		}
-	}
-
-	if consumedSlots > 0 {
-		if err := s.playlistRepo.IncrementCursor(ctx, playlistID, consumedSlots); err != nil {
+	for _, item := range queueItemsNotIn(itemIDs(existing), planned) {
+		if err := s.playlistRepo.AddQueueItem(ctx, &item); err != nil {
 			return 0, err
 		}
 	}
-	active, countErr := s.playlistRepo.CountPendingQueueItems(ctx, playlistID)
-	if countErr != nil {
-		return inserted, countErr
+	if cursor != playlist.CycleCursor {
+		if err := s.playlistRepo.IncrementCursor(ctx, playlistID, cursor-playlist.CycleCursor); err != nil {
+			return 0, err
+		}
 	}
-	slog.Info("playlist fill complete", "playlist_id", playlistID, "target", playlist.QueueTargetCount, "active", active, "inserted", inserted, "member_count", len(members), "slot_count", len(slots))
-	if active < playlist.QueueTargetCount {
-		return inserted, &QueueShortfallError{Target: playlist.QueueTargetCount, Active: active}
+	if len(planned) < playlist.QueueTargetCount {
+		return len(planned) - activeQueueCount(existing), &QueueShortfallError{Target: playlist.QueueTargetCount, Active: len(planned)}
 	}
+	return len(planned) - activeQueueCount(existing), nil
+}
 
-	return inserted, nil
+func activeQueueCount(items []repository.PlaylistQueueItem) int {
+	n := 0
+	for _, item := range items {
+		if item.Status == "pending" || item.Status == "pushed" || item.Status == "watching" {
+			n++
+		}
+	}
+	return n
+}
+
+func itemIDs(items []repository.PlaylistQueueItem) map[string]bool {
+	ids := make(map[string]bool, len(items))
+	for _, item := range items {
+		ids[item.ID] = true
+	}
+	return ids
+}
+
+func queueItemsNotIn(existing map[string]bool, planned []repository.PlaylistQueueItem) []repository.PlaylistQueueItem {
+	items := make([]repository.PlaylistQueueItem, 0, len(planned))
+	for _, item := range planned {
+		if !existing[item.ID] {
+			items = append(items, item)
+		}
+	}
+	return items
+}
+
+// planPlaylist never writes state. Passing an empty existing queue is what
+// makes rebuild a replacement operation rather than an already-full fill.
+func (s *Service) planPlaylist(ctx context.Context, playlist *repository.Playlist, existing []repository.PlaylistQueueItem) ([]repository.PlaylistQueueItem, int, error) {
+	slots, err := s.playlistRepo.ListSlots(ctx, playlist.ID)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list slots: %w", err)
+	}
+	if len(slots) == 0 {
+		return nil, 0, fmt.Errorf("no slots configured")
+	}
+	members, err := s.playlistRepo.ListSeries(ctx, playlist.ID)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list series: %w", err)
+	}
+	if len(members) == 0 {
+		return nil, 0, fmt.Errorf("no series configured")
+	}
+	queued := make(map[string]bool)
+	for _, item := range existing {
+		if item.Status == "pending" || item.Status == "pushed" || item.Status == "watching" {
+			queued[item.EpisodeID] = true
+		}
+	}
+	need := playlist.QueueTargetCount - activeQueueCount(existing)
+	if need <= 0 {
+		return existing, playlist.CycleCursor, nil
+	}
+	result := append([]repository.PlaylistQueueItem(nil), existing...)
+	consumed := 0
+	for len(result)-activeQueueCount(existing) < need {
+		candidates := make([]fillCandidate, 0, len(members))
+		for _, member := range members {
+			episodeID, rating, err := s.getPlaylistEpisode(ctx, member, playlist.ID, queued)
+			if err != nil {
+				return nil, 0, fmt.Errorf("evaluate series %s: %w", member.SeriesID, err)
+			}
+			if episodeID != "" {
+				candidates = append(candidates, fillCandidate{seriesID: member.SeriesID, psID: member.ID, mode: member.Mode, episodeID: episodeID, rating: rating, lastSeenAt: member.LastSeenAt})
+			}
+		}
+		if len(candidates) == 0 {
+			break
+		}
+		global := playlist.CycleCursor + consumed
+		slot := slots[global%len(slots)]
+		selected, ok := selectFillCandidate(candidates, slot.SlotType, global, len(members))
+		consumed++
+		if !ok {
+			break
+		}
+		score := selected.rating
+		item := repository.PlaylistQueueItem{ID: uuid.NewString(), PlaylistID: playlist.ID, CycleIndex: global / len(slots), SlotPosition: global % len(slots), SlotType: slot.SlotType, SeriesID: selected.seriesID, EpisodeID: selected.episodeID, Position: len(result) + 1, Score: &score, Status: "pending"}
+		if selected.mode == "serial" {
+			item.PlaylistSeriesID = &selected.psID
+		}
+		result = append(result, item)
+		queued[selected.episodeID] = true
+	}
+	return result, playlist.CycleCursor + consumed, nil
 }
 
 func (s *Service) getPlaylistEpisode(ctx context.Context, member repository.PlaylistSeries, playlistID string, queued map[string]bool) (string, float64, error) {
@@ -1495,7 +1522,7 @@ func (s *Service) getPlaylistEpisode(ctx context.Context, member repository.Play
 		}
 		episodes, err := s.episodeRepo.ListAvailableBySeries(ctx, member.SeriesID)
 		if err != nil {
-			return "", 0, nil
+			return "", 0, fmt.Errorf("list catalog: %w", err)
 		}
 
 		history, err := s.playlistRepo.HistoryEpisodeIDs(ctx, member.ID)
@@ -1512,7 +1539,7 @@ func (s *Service) getPlaylistEpisode(ctx context.Context, member repository.Play
 	// them to the pool as later episodes are watched.
 	episodes, err := s.episodeRepo.ListAvailableBySeries(ctx, member.SeriesID)
 	if err != nil {
-		return "", 0, nil
+		return "", 0, fmt.Errorf("list catalog: %w", err)
 	}
 	if len(episodes) == 0 {
 		return "", 0, nil
@@ -1521,7 +1548,7 @@ func (s *Service) getPlaylistEpisode(ctx context.Context, member repository.Play
 	cooldown := effectiveRandomEpisodeCooldown(episodes, rules, queued, member.RandomEpisodeCooldown)
 	history, err := s.playlistRepo.RecentHistoryEpisodeIDs(ctx, member.ID, cooldown)
 	if err != nil {
-		return "", 0, nil
+		return "", 0, fmt.Errorf("list recent history: %w", err)
 	}
 
 	eligible := eligibleRandomEpisodes(episodes, rules, history, queued)
@@ -1988,29 +2015,41 @@ func (s *Service) clearPlaylistQueue(ctx context.Context, playlistID string) err
 	return nil
 }
 
-func (s *Service) RefillPlaylist(ctx context.Context, playlistID string) (int, error) {
+func (s *Service) RefillPlaylist(ctx context.Context, playlistID string) (*PlaylistOperationResult, error) {
 	lock := s.playlistLock(playlistID)
 	if err := lock.acquire(ctx); err != nil {
-		return 0, err
+		return nil, err
 	}
 	defer lock.release()
-	// Fill is incremental, so plan against the committed queue. Never delete the
-	// existing queue before planning: a canceled or failed rebuild must not turn
-	// a usable playlist into an empty one.
-	queued, fillErr := s.fillPlaylist(ctx, playlistID)
-	var shortfall *QueueShortfallError
-	if fillErr != nil && !errors.As(fillErr, &shortfall) {
-		return 0, fmt.Errorf("fill playlist: %w", fillErr)
+	if err := s.playlistRepo.EnsureDefaultSlot(ctx, playlistID); err != nil {
+		return nil, fmt.Errorf("ensure default slot: %w", err)
 	}
+	playlist, err := s.playlistRepo.GetByID(ctx, playlistID)
+	if err != nil {
+		return nil, err
+	}
+	existing, err := s.playlistRepo.ListQueueItems(ctx, playlistID)
+	if err != nil {
+		return nil, err
+	}
+	// Rebuild deliberately supplies an empty working queue. The committed queue
+	// is only the revision guard and is never used to satisfy the target.
+	planned, cursor, err := s.planPlaylist(ctx, playlist, nil)
+	if err != nil {
+		return nil, fmt.Errorf("plan rebuild: %w", err)
+	}
+	if len(planned) == 0 && playlist.QueueTargetCount > 0 {
+		return nil, &QueueShortfallError{Target: playlist.QueueTargetCount, Active: 0, Reasons: []string{"no eligible episodes"}}
+	}
+	if err := s.playlistRepo.ReplaceQueue(ctx, playlistID, queueRevision(existing), planned, cursor); err != nil {
+		return nil, fmt.Errorf("commit rebuild: %w", err)
+	}
+	result := &PlaylistOperationResult{Operation: "rebuild", Rebuilt: true, ActiveCount: len(planned), TargetCount: playlist.QueueTargetCount, Shortfall: max(playlist.QueueTargetCount-len(planned), 0), PublicationStatus: "published"}
 	if err := s.publishPlaylistProjection(ctx, playlistID); err != nil {
-		return 0, fmt.Errorf("publish refilled queue: %w", err)
+		result.PublicationStatus = "failed"
+		return result, &PlaylistPublicationError{Result: result, Err: fmt.Errorf("publish rebuilt queue: %w", err)}
 	}
-	if fillErr != nil {
-		// A shortfall is an expected partial result when the local catalog cannot
-		// satisfy the target. The published projection still reflects that result.
-		return queued, nil
-	}
-	return queued, nil
+	return result, nil
 }
 
 func (s *Service) GetPlexPlaylist(ctx context.Context, playlistID string) (*PlexPlaylistResponse, error) {
