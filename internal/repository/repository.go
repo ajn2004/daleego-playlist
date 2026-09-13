@@ -286,10 +286,23 @@ func (r *EpisodeRepo) UpsertAll(ctx context.Context, episodes []*Episode) error 
 	}
 
 	seriesID := episodes[0].SeriesID
+	serverIDs := make(map[string]struct{}, len(episodes))
+	positions := make(map[int]struct{}, len(episodes))
 	for _, episode := range episodes {
 		if episode.SeriesID != seriesID {
 			return fmt.Errorf("episodes belong to different series")
 		}
+		if episode.ServerEpisodeID == "" || episode.AbsoluteOrder <= 0 {
+			return fmt.Errorf("episode %q has invalid identity or absolute order", episode.ServerEpisodeID)
+		}
+		if _, exists := serverIDs[episode.ServerEpisodeID]; exists {
+			return fmt.Errorf("duplicate server episode ID %q", episode.ServerEpisodeID)
+		}
+		if _, exists := positions[episode.AbsoluteOrder]; exists {
+			return fmt.Errorf("duplicate absolute order %d", episode.AbsoluteOrder)
+		}
+		serverIDs[episode.ServerEpisodeID] = struct{}{}
+		positions[episode.AbsoluteOrder] = struct{}{}
 	}
 
 	tx, err := r.pool.Begin(ctx)
@@ -298,16 +311,9 @@ func (r *EpisodeRepo) UpsertAll(ctx context.Context, episodes []*Episode) error 
 	}
 	defer tx.Rollback(ctx)
 
-	// Serialize refreshes for a series before moving its positions aside.
+	// Serialize refreshes for a series. Unavailable rows do not occupy positions.
 	if _, err := tx.Exec(ctx, `SELECT id FROM series WHERE id = $1 FOR UPDATE`, seriesID); err != nil {
 		return fmt.Errorf("lock series: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `UPDATE episodes
-		SET absolute_order = absolute_order + (
-			SELECT COALESCE(MAX(absolute_order), 0) + $2 FROM episodes WHERE series_id = $1
-		)
-		WHERE series_id = $1`, seriesID, len(episodes)); err != nil {
-		return fmt.Errorf("stage episode positions: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE episodes SET unavailable = true WHERE series_id = $1`, seriesID); err != nil {
 		return fmt.Errorf("mark missing episodes unavailable: %w", err)
@@ -334,6 +340,17 @@ func (r *EpisodeRepo) UpsertAll(ctx context.Context, episodes []*Episode) error 
 			return fmt.Errorf("upsert episode %q: %w", episode.Title, err)
 		}
 	}
+	if _, err := tx.Exec(ctx, `UPDATE series_progress p SET next_position = e.absolute_order
+		FROM episodes e WHERE e.id = p.next_episode_id AND e.series_id = p.series_id
+		AND e.series_id = $1 AND e.unavailable = false`, seriesID); err != nil {
+		return fmt.Errorf("reconcile series cursor position: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE playlist_series_progress p SET next_position = e.absolute_order
+		FROM playlist_series ps, episodes e WHERE ps.id = p.playlist_series_id
+		AND e.id = p.next_episode_id AND e.series_id = ps.series_id
+		AND ps.series_id = $1 AND e.unavailable = false`, seriesID); err != nil {
+		return fmt.Errorf("reconcile playlist cursor position: %w", err)
+	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit episode refresh: %w", err)
@@ -358,6 +375,27 @@ func (r *EpisodeRepo) ListBySeries(ctx context.Context, seriesID string) ([]Epis
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate episodes: %w", err)
+	}
+	return episodes, nil
+}
+
+func (r *EpisodeRepo) ListAvailableBySeries(ctx context.Context, seriesID string) ([]Episode, error) {
+	rows, err := r.pool.Query(ctx, `SELECT id, series_id, server_episode_id, season_number, episode_number, absolute_order, title, duration_seconds, rating, COALESCE(originally_available_at::text, ''), unavailable, created_at FROM episodes WHERE series_id = $1 AND unavailable = false ORDER BY absolute_order, id`, seriesID)
+	if err != nil {
+		return nil, fmt.Errorf("list available episodes: %w", err)
+	}
+	defer rows.Close()
+
+	var episodes []Episode
+	for rows.Next() {
+		var e Episode
+		if err := rows.Scan(&e.ID, &e.SeriesID, &e.ServerEpisodeID, &e.SeasonNumber, &e.EpisodeNumber, &e.AbsoluteOrder, &e.Title, &e.Duration, &e.Rating, &e.AirDate, &e.Unavailable, &e.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan available episode: %w", err)
+		}
+		episodes = append(episodes, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate available episodes: %w", err)
 	}
 	return episodes, nil
 }

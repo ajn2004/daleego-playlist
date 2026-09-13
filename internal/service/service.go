@@ -237,7 +237,7 @@ func (s *Service) SetActive(ctx context.Context, id string, active bool) error {
 }
 
 func (s *Service) initializeCursor(ctx context.Context, seriesID string) error {
-	episodes, err := s.episodeRepo.ListBySeries(ctx, seriesID)
+	episodes, err := s.episodeRepo.ListAvailableBySeries(ctx, seriesID)
 	if err != nil {
 		return fmt.Errorf("list episodes: %w", err)
 	}
@@ -251,7 +251,7 @@ func (s *Service) initializeCursor(ctx context.Context, seriesID string) error {
 		if err := s.importEpisodes(ctx, series); err != nil {
 			return err
 		}
-		episodes, err = s.episodeRepo.ListBySeries(ctx, seriesID)
+		episodes, err = s.episodeRepo.ListAvailableBySeries(ctx, seriesID)
 		if err != nil {
 			return err
 		}
@@ -327,6 +327,22 @@ func (s *Service) importEpisodes(ctx context.Context, series *repository.Series)
 	if len(episodes) == 0 {
 		return fmt.Errorf("no episodes returned by Plex for series %s", series.ServerSeriesID)
 	}
+	seenIDs := make(map[string]struct{}, len(episodes))
+	seenPositions := make(map[[2]int]struct{}, len(episodes))
+	for _, ep := range episodes {
+		if ep.ID == "" || ep.Title == "" || ep.SeasonNumber < 0 || ep.EpisodeNumber < 0 {
+			return fmt.Errorf("invalid episode in Plex snapshot for series %s", series.ServerSeriesID)
+		}
+		if _, exists := seenIDs[ep.ID]; exists {
+			return fmt.Errorf("duplicate episode %q in Plex snapshot", ep.ID)
+		}
+		position := [2]int{ep.SeasonNumber, ep.EpisodeNumber}
+		if _, exists := seenPositions[position]; exists {
+			return fmt.Errorf("duplicate season/episode %d/%d in Plex snapshot", ep.SeasonNumber, ep.EpisodeNumber)
+		}
+		seenIDs[ep.ID] = struct{}{}
+		seenPositions[position] = struct{}{}
+	}
 
 	imported := make([]*repository.Episode, 0, len(episodes))
 	for i, ep := range episodes {
@@ -359,7 +375,7 @@ func (s *Service) importEpisodes(ctx context.Context, series *repository.Series)
 // --- Cursor ---
 
 func (s *Service) advanceCursor(ctx context.Context, seriesID string, watchedEpisodeID string) error {
-	episodes, err := s.episodeRepo.ListBySeries(ctx, seriesID)
+	episodes, err := s.episodeRepo.ListAvailableBySeries(ctx, seriesID)
 	if err != nil {
 		return fmt.Errorf("list episodes: %w", err)
 	}
@@ -808,7 +824,7 @@ func (s *Service) buildCandidates(ctx context.Context) ([]rotation.Candidate, er
 		}
 
 		// Build window ratings
-		episodes, err := s.episodeRepo.ListBySeries(ctx, series.ID)
+		episodes, err := s.episodeRepo.ListAvailableBySeries(ctx, series.ID)
 		if err != nil {
 			continue
 		}
@@ -1477,7 +1493,7 @@ func (s *Service) getPlaylistEpisode(ctx context.Context, member repository.Play
 		if progress.NextEpisodeID == nil {
 			return "", 0, nil
 		}
-		episodes, err := s.episodeRepo.ListBySeries(ctx, member.SeriesID)
+		episodes, err := s.episodeRepo.ListAvailableBySeries(ctx, member.SeriesID)
 		if err != nil {
 			return "", 0, nil
 		}
@@ -1494,7 +1510,7 @@ func (s *Service) getPlaylistEpisode(ctx context.Context, member repository.Play
 
 	// Non-serial: exclude only the most recently played episodes, then return
 	// them to the pool as later episodes are watched.
-	episodes, err := s.episodeRepo.ListBySeries(ctx, member.SeriesID)
+	episodes, err := s.episodeRepo.ListAvailableBySeries(ctx, member.SeriesID)
 	if err != nil {
 		return "", 0, nil
 	}
@@ -1600,7 +1616,7 @@ func nextAllowedEpisodeAfter(episodes []repository.Episode, currentID string, ru
 }
 
 func (s *Service) initPlaylistCursor(ctx context.Context, member repository.PlaylistSeries) (string, float64, error) {
-	episodes, err := s.episodeRepo.ListBySeries(ctx, member.SeriesID)
+	episodes, err := s.episodeRepo.ListAvailableBySeries(ctx, member.SeriesID)
 	if err != nil {
 		return "", 0, err
 	}
@@ -1642,7 +1658,7 @@ func (s *Service) advancePlaylistCursor(ctx context.Context, playlistSeriesID, w
 		return fmt.Errorf("get playlist series: %w", err)
 	}
 
-	episodes, err := s.episodeRepo.ListBySeries(ctx, member.SeriesID)
+	episodes, err := s.episodeRepo.ListAvailableBySeries(ctx, member.SeriesID)
 	if err != nil {
 		return err
 	}
@@ -2149,7 +2165,7 @@ func (s *Service) completePlaylistQueueItem(ctx context.Context, playlist *repos
 			if err != nil {
 				return fmt.Errorf("get playlist series: %w", err)
 			}
-			episodes, err := s.episodeRepo.ListBySeries(ctx, member.SeriesID)
+			episodes, err := s.episodeRepo.ListAvailableBySeries(ctx, member.SeriesID)
 			if err != nil {
 				return err
 			}
@@ -2184,8 +2200,19 @@ func (s *Service) SyncPlaylist(ctx context.Context, playlistID string) (int, int
 	if err := lock.acquire(ctx); err != nil {
 		return 0, 0, err
 	}
-	defer lock.release()
-	return s.syncPlaylist(ctx, playlistID)
+	watched, queued, syncErr := s.syncPlaylist(ctx, playlistID)
+	lock.release()
+
+	// Catalog refresh is deliberately outside the playback lock and has its own
+	// bounded failure boundary. A stale or unavailable catalog must not prevent
+	// playback observations from being consumed.
+	refreshCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	refreshErr := s.refreshPlaylistCatalog(refreshCtx, playlistID)
+	cancel()
+	if refreshErr != nil {
+		slog.Error("catalog refresh failed; playback tracking completed independently", "playlist_id", playlistID, "error", refreshErr)
+	}
+	return watched, queued, syncErr
 }
 
 func (s *Service) syncPlaylist(ctx context.Context, playlistID string) (int, int, error) {
@@ -2193,10 +2220,6 @@ func (s *Service) syncPlaylist(ctx context.Context, playlistID string) (int, int
 	if err != nil {
 		return 0, 0, err
 	}
-	if err := s.refreshPlaylistCatalog(ctx, playlistID); err != nil {
-		return 0, 0, fmt.Errorf("refresh playlist catalog: %w", err)
-	}
-
 	items, err := s.playlistRepo.ListQueueItems(ctx, playlistID)
 	if err != nil {
 		return 0, 0, err
@@ -2224,9 +2247,9 @@ func (s *Service) syncPlaylist(ctx context.Context, playlistID string) (int, int
 		itemByServerID[ep.ServerEpisodeID] = &item
 	}
 
-	progressList, err := client.GetEpisodeProgress(ctx, episodeIDs)
-	if err != nil {
-		return 0, 0, fmt.Errorf("get progress: %w", err)
+	progressList, progressErr := client.GetEpisodeProgress(ctx, episodeIDs)
+	if progressErr != nil {
+		slog.Warn("some playback lookups were unresolved", "playlist_id", playlistID, "error", progressErr)
 	}
 
 	watched := 0
@@ -2265,6 +2288,9 @@ func (s *Service) syncPlaylist(ctx context.Context, playlistID string) (int, int
 		return watched, queued, fmt.Errorf("publish queue projection: %w", err)
 	}
 
+	if progressErr != nil {
+		return watched, queued, fmt.Errorf("playback lookup incomplete: %w", progressErr)
+	}
 	return watched, queued, nil
 }
 

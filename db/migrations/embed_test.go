@@ -32,3 +32,13 @@ func TestEmbeddedMigrationsIncludeSeriesServerGUID(t *testing.T) {
 		t.Fatal("series GUID migration is empty")
 	}
 }
+
+func TestEmbeddedMigrationsIncludeAvailableEpisodePositions(t *testing.T) {
+	contents, err := FS.ReadFile("011_available_episode_positions.sql")
+	if err != nil {
+		t.Fatalf("read available episode positions migration: %v", err)
+	}
+	if len(contents) == 0 {
+		t.Fatal("available episode positions migration is empty")
+	}
+}

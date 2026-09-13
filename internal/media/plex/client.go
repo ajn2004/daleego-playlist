@@ -21,6 +21,20 @@ type Client struct {
 	httpClient *http.Client
 }
 
+// EpisodeProgressLookupError reports IDs that could not be read while keeping
+// successful observations available to the caller.
+type EpisodeProgressLookupError struct {
+	Errors []error
+}
+
+func (e *EpisodeProgressLookupError) Error() string {
+	parts := make([]string, 0, len(e.Errors))
+	for _, err := range e.Errors {
+		parts = append(parts, err.Error())
+	}
+	return "episode progress lookup incomplete: " + strings.Join(parts, "; ")
+}
+
 type MediaContainer struct {
 	XMLName   xml.Name      `xml:"MediaContainer"`
 	Size      int           `xml:"size,attr"`
@@ -419,11 +433,13 @@ func (c *Client) GetEpisodeProgress(ctx context.Context, episodeIDs []string) ([
 	}
 
 	var allProgress []media.EpisodeProgress
+	lookupErrors := make([]error, 0)
 
 	for _, id := range episodeIDs {
 		resp, err := c.doRequest(ctx, fmt.Sprintf("/library/metadata/%s", id), nil)
 		if err != nil {
-			return nil, fmt.Errorf("get episode progress: %w", err)
+			lookupErrors = append(lookupErrors, fmt.Errorf("episode %s: %w", id, err))
+			continue
 		}
 
 		var container struct {
@@ -432,11 +448,20 @@ func (c *Client) GetEpisodeProgress(ctx context.Context, episodeIDs []string) ([
 		}
 		if err := xml.NewDecoder(resp.Body).Decode(&container); err != nil {
 			resp.Body.Close()
-			return nil, fmt.Errorf("decode episode progress: %w", err)
+			lookupErrors = append(lookupErrors, fmt.Errorf("episode %s: decode progress: %w", id, err))
+			continue
 		}
 		resp.Body.Close()
 
+		if len(container.Video) == 0 {
+			lookupErrors = append(lookupErrors, fmt.Errorf("episode %s: Plex returned no episode", id))
+			continue
+		}
 		for _, v := range container.Video {
+			if v.RatingKey == "" {
+				lookupErrors = append(lookupErrors, fmt.Errorf("episode %s: Plex response has no rating key", id))
+				continue
+			}
 			progress := media.EpisodeProgress{
 				EpisodeID:    v.RatingKey,
 				ViewCount:    v.ViewCount,
@@ -451,6 +476,9 @@ func (c *Client) GetEpisodeProgress(ctx context.Context, episodeIDs []string) ([
 		}
 	}
 
+	if len(lookupErrors) > 0 {
+		return allProgress, &EpisodeProgressLookupError{Errors: lookupErrors}
+	}
 	return allProgress, nil
 }
 

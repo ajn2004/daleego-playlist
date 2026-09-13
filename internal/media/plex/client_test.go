@@ -3,6 +3,7 @@ package plex
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -222,6 +223,27 @@ func TestGetEpisodeProgress(t *testing.T) {
 	}
 	if progress[0].LastViewedAt != 1700000000 {
 		t.Errorf("expected last viewed timestamp 1700000000, got %d", progress[0].LastViewedAt)
+	}
+}
+
+func TestGetEpisodeProgressKeepsSuccessfulLookupsWhenOneIDIsStale(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		if strings.HasSuffix(r.URL.Path, "/missing") {
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Fprint(w, `<MediaContainer><Video ratingKey="known" viewCount="1" lastViewedAt="1700000000"/></MediaContainer>`)
+	}))
+	defer server.Close()
+
+	progress, err := NewClient(server.URL, "token", time.Second).GetEpisodeProgress(context.Background(), []string{"known", "missing"})
+	if len(progress) != 1 || progress[0].EpisodeID != "known" {
+		t.Fatalf("progress = %#v, want successful known observation", progress)
+	}
+	var lookupErr *EpisodeProgressLookupError
+	if !errors.As(err, &lookupErr) {
+		t.Fatalf("error = %v, want partial lookup error", err)
 	}
 }
 
