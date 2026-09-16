@@ -115,7 +115,7 @@ export const api = {
     publish: (id: string) =>
       request<{ status: string }>(`/api/v1/playlists/${id}/publish`, { method: 'POST' }),
     sync: (id: string) =>
-      request<{ status: string; watched: number; added_count: number }>(`/api/v1/playlists/${id}/sync`, { method: 'POST' }),
+      request<import('../types').SyncPlaylistResult>(`/api/v1/playlists/${id}/sync`, { method: 'POST' }),
     plexItems: (id: string) =>
       request<import('../types').PlexPlaylistState>(`/api/v1/playlists/${id}/plex-items`),
     replacePlexItems: (id: string, data: { base_revision: string; ordered_queue_item_ids: string[]; removed_queue_item_ids: string[] }) =>

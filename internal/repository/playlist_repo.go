@@ -547,6 +547,31 @@ func (r *PlaylistRepo) AddQueueItem(ctx context.Context, item *PlaylistQueueItem
 	return err
 }
 
+// AppendQueueItemsAndAdvance commits a fill's new occurrences and cycle cursor
+// together. Existing queue rows are intentionally left untouched.
+func (r *PlaylistRepo) AppendQueueItemsAndAdvance(ctx context.Context, playlistID string, items []PlaylistQueueItem, cycleCursor int) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin append queue transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	for _, item := range items {
+		if _, err := tx.Exec(ctx, `INSERT INTO playlist_queue_items (id, playlist_id, cycle_index, slot_position, slot_type, series_id, playlist_series_id, episode_id, position, score, status, created_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())`,
+			item.ID, item.PlaylistID, item.CycleIndex, item.SlotPosition, item.SlotType, item.SeriesID, item.PlaylistSeriesID, item.EpisodeID, item.Position, item.Score, item.Status); err != nil {
+			return fmt.Errorf("insert appended queue item: %w", err)
+		}
+	}
+	if _, err := tx.Exec(ctx, `UPDATE playlists SET cycle_cursor = $2, updated_at = now() WHERE id = $1`, playlistID, cycleCursor); err != nil {
+		return fmt.Errorf("update append cursor: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit appended queue: %w", err)
+	}
+	return nil
+}
+
 // ReplaceQueue verifies the caller's snapshot and replaces the queue and its
 // cursor in one transaction. History and playlist-series progress are kept.
 func (r *PlaylistRepo) ReplaceQueue(ctx context.Context, playlistID, expectedRevision string, items []PlaylistQueueItem, cycleCursor int) error {

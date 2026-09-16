@@ -470,12 +470,17 @@ func (s *Server) handlePublishPlaylist(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSyncPlaylist(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	watched, queued, err := s.svc.SyncPlaylist(r.Context(), id)
+	result, err := s.svc.SyncPlaylist(r.Context(), id)
+	var syncErr *service.PlaylistSyncError
+	if errors.As(err, &syncErr) {
+		writeJSON(w, http.StatusOK, syncErr.Result)
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "sync_failed", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"status": "synced", "watched": watched, "added_count": queued})
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) handleGetPlexPlaylist(w http.ResponseWriter, r *http.Request) {

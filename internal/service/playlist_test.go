@@ -321,3 +321,36 @@ func TestQueueItemsNotInDoesNotTreatExistingQueueAsNew(t *testing.T) {
 		t.Fatalf("new queue items = %#v, want only replacement addition", got)
 	}
 }
+
+func TestNextQueuePositionUsesMaximumPersistedPosition(t *testing.T) {
+	tests := []struct {
+		name  string
+		items []repository.PlaylistQueueItem
+		want  int
+	}{
+		{name: "contiguous", items: queuePositions(1, 2, 3), want: 4},
+		{name: "middle removal", items: queuePositions(1, 3, 4), want: 5},
+		{name: "tail removal", items: queuePositions(1, 2, 3), want: 4},
+		{name: "gapped", items: queuePositions(1, 8, 12), want: 13},
+		{name: "inactive retained", items: []repository.PlaylistQueueItem{
+			{Position: 1, Status: "pushed"},
+			{Position: 2, Status: "skipped"},
+			{Position: 10, Status: "pushed"},
+		}, want: 11},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := nextQueuePosition(tt.items); got != tt.want {
+				t.Fatalf("next queue position = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func queuePositions(positions ...int) []repository.PlaylistQueueItem {
+	items := make([]repository.PlaylistQueueItem, len(positions))
+	for i, position := range positions {
+		items[i] = repository.PlaylistQueueItem{Position: position, Status: "pushed"}
+	}
+	return items
+}

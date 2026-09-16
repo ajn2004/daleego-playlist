@@ -575,11 +575,13 @@ function PlaylistEditor({
     try {
       const res = await api.playlists.sync(playlist.id)
       await loadDetail()
-      const w = (res as any).watched ?? 0
-       const q = res.added_count ?? 0
+      const w = res.completions_recorded
+      const q = res.added_count
       const parts: string[] = []
       if (w > 0) parts.push(`Synced ${w} watched episode(s)`)
       if (q > 0) parts.push(`Queued ${q} new episode(s)`)
+      if (res.top_up_status === 'failed') parts.push(`Top-up failed: ${res.top_up_error ?? 'unknown error'}`)
+      if (res.publication_status === 'pending_retry') parts.push('Plex publication is pending retry')
       onStatus(parts.length > 0 ? parts.join(', ') : 'No newly watched episodes found')
     } catch (e: any) {
       onStatus('Sync failed: ' + e.message)

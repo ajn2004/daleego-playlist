@@ -123,6 +123,19 @@ export interface PlaylistOperationResult {
   reasons?: string[]
 }
 
+export interface SyncPlaylistResult {
+  status: string
+  watched: number
+  completions_recorded: number
+  added_count: number
+  active_count: number
+  target_count: number
+  shortfall: number
+  top_up_status: 'succeeded' | 'failed'
+  top_up_error?: string
+  publication_status: 'succeeded' | 'pending_retry'
+}
+
 export interface PlaylistSeries {
   id: string
   series_id: string

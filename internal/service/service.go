@@ -952,6 +952,27 @@ type PlaylistOperationResult struct {
 	Reasons           []string `json:"reasons,omitempty"`
 }
 
+type SyncPlaylistResult struct {
+	Status              string `json:"status"`
+	Watched             int    `json:"watched"`
+	CompletionsRecorded int    `json:"completions_recorded"`
+	AddedCount          int    `json:"added_count"`
+	ActiveCount         int    `json:"active_count"`
+	TargetCount         int    `json:"target_count"`
+	Shortfall           int    `json:"shortfall"`
+	TopUpStatus         string `json:"top_up_status"`
+	TopUpError          string `json:"top_up_error,omitempty"`
+	PublicationStatus   string `json:"publication_status"`
+}
+
+type PlaylistSyncError struct {
+	Result *SyncPlaylistResult
+	Err    error
+}
+
+func (e *PlaylistSyncError) Error() string { return e.Err.Error() }
+func (e *PlaylistSyncError) Unwrap() error { return e.Err }
+
 type PlaylistPublicationError struct {
 	Result *PlaylistOperationResult
 	Err    error
@@ -1365,15 +1386,8 @@ func (s *Service) FillPlaylist(ctx context.Context, playlistID string) (*Playlis
 	}
 	newItems := queueItemsNotIn(itemIDs(existing), planned)
 	added := len(newItems)
-	for _, item := range newItems {
-		if err := s.playlistRepo.AddQueueItem(ctx, &item); err != nil {
-			return nil, err
-		}
-	}
-	if cursor != playlist.CycleCursor {
-		if err := s.playlistRepo.IncrementCursor(ctx, playlistID, cursor-playlist.CycleCursor); err != nil {
-			return nil, err
-		}
+	if err := s.playlistRepo.AppendQueueItemsAndAdvance(ctx, playlistID, newItems, cursor); err != nil {
+		return nil, err
 	}
 	active := activeQueueCount(planned)
 	result := &PlaylistOperationResult{Operation: "fill", AddedCount: max(added, 0), ActiveCount: active, TargetCount: playlist.QueueTargetCount, Shortfall: max(playlist.QueueTargetCount-active, 0), PublicationStatus: "not_published"}
@@ -1399,20 +1413,15 @@ func (s *Service) fillPlaylist(ctx context.Context, playlistID string) (int, err
 	if err != nil {
 		return 0, err
 	}
-	for _, item := range queueItemsNotIn(itemIDs(existing), planned) {
-		if err := s.playlistRepo.AddQueueItem(ctx, &item); err != nil {
-			return 0, err
-		}
+	newItems := queueItemsNotIn(itemIDs(existing), planned)
+	if err := s.playlistRepo.AppendQueueItemsAndAdvance(ctx, playlistID, newItems, cursor); err != nil {
+		return 0, err
 	}
-	if cursor != playlist.CycleCursor {
-		if err := s.playlistRepo.IncrementCursor(ctx, playlistID, cursor-playlist.CycleCursor); err != nil {
-			return 0, err
-		}
+	active := activeQueueCount(planned)
+	if active < playlist.QueueTargetCount {
+		return len(newItems), &QueueShortfallError{Target: playlist.QueueTargetCount, Active: active}
 	}
-	if len(planned) < playlist.QueueTargetCount {
-		return len(planned) - activeQueueCount(existing), &QueueShortfallError{Target: playlist.QueueTargetCount, Active: len(planned)}
-	}
-	return len(planned) - activeQueueCount(existing), nil
+	return len(newItems), nil
 }
 
 func activeQueueCount(items []repository.PlaylistQueueItem) int {
@@ -1471,8 +1480,10 @@ func (s *Service) planPlaylist(ctx context.Context, playlist *repository.Playlis
 		return existing, playlist.CycleCursor, nil
 	}
 	result := append([]repository.PlaylistQueueItem(nil), existing...)
+	nextPosition := nextQueuePosition(existing)
 	consumed := 0
-	for len(result)-activeQueueCount(existing) < need {
+	added := 0
+	for added < need {
 		candidates := make([]fillCandidate, 0, len(members))
 		for _, member := range members {
 			episodeID, rating, err := s.getPlaylistEpisode(ctx, member, playlist.ID, queued)
@@ -1494,14 +1505,26 @@ func (s *Service) planPlaylist(ctx context.Context, playlist *repository.Playlis
 			break
 		}
 		score := selected.rating
-		item := repository.PlaylistQueueItem{ID: uuid.NewString(), PlaylistID: playlist.ID, CycleIndex: global / len(slots), SlotPosition: global % len(slots), SlotType: slot.SlotType, SeriesID: selected.seriesID, EpisodeID: selected.episodeID, Position: len(result) + 1, Score: &score, Status: "pending"}
+		item := repository.PlaylistQueueItem{ID: uuid.NewString(), PlaylistID: playlist.ID, CycleIndex: global / len(slots), SlotPosition: global % len(slots), SlotType: slot.SlotType, SeriesID: selected.seriesID, EpisodeID: selected.episodeID, Position: nextPosition, Score: &score, Status: "pending"}
 		if selected.mode == "serial" {
 			item.PlaylistSeriesID = &selected.psID
 		}
 		result = append(result, item)
+		nextPosition++
+		added++
 		queued[selected.episodeID] = true
 	}
 	return result, playlist.CycleCursor + consumed, nil
+}
+
+func nextQueuePosition(items []repository.PlaylistQueueItem) int {
+	next := 1
+	for _, item := range items {
+		if item.Position >= next {
+			next = item.Position + 1
+		}
+	}
+	return next
 }
 
 func (s *Service) getPlaylistEpisode(ctx context.Context, member repository.PlaylistSeries, playlistID string, queued map[string]bool) (string, float64, error) {
@@ -2234,12 +2257,12 @@ func (s *Service) completePlaylistQueueItem(ctx context.Context, playlist *repos
 	return nil
 }
 
-func (s *Service) SyncPlaylist(ctx context.Context, playlistID string) (int, int, error) {
+func (s *Service) SyncPlaylist(ctx context.Context, playlistID string) (*SyncPlaylistResult, error) {
 	lock := s.playlistLock(playlistID)
 	if err := lock.acquire(ctx); err != nil {
-		return 0, 0, err
+		return nil, err
 	}
-	watched, queued, syncErr := s.syncPlaylist(ctx, playlistID)
+	result, syncErr := s.syncPlaylist(ctx, playlistID)
 	lock.release()
 
 	// Catalog refresh is deliberately outside the playback lock and has its own
@@ -2251,22 +2274,22 @@ func (s *Service) SyncPlaylist(ctx context.Context, playlistID string) (int, int
 	if refreshErr != nil {
 		slog.Error("catalog refresh failed; playback tracking completed independently", "playlist_id", playlistID, "error", refreshErr)
 	}
-	return watched, queued, syncErr
+	return result, syncErr
 }
 
-func (s *Service) syncPlaylist(ctx context.Context, playlistID string) (int, int, error) {
+func (s *Service) syncPlaylist(ctx context.Context, playlistID string) (*SyncPlaylistResult, error) {
 	p, err := s.playlistRepo.GetByID(ctx, playlistID)
 	if err != nil {
-		return 0, 0, err
+		return nil, err
 	}
 	items, err := s.playlistRepo.ListQueueItems(ctx, playlistID)
 	if err != nil {
-		return 0, 0, err
+		return nil, err
 	}
 
 	server, err := s.serverRepo.GetByID(ctx, p.MediaServerID)
 	if err != nil {
-		return 0, 0, fmt.Errorf("get server: %w", err)
+		return nil, fmt.Errorf("get server: %w", err)
 	}
 
 	client := plex.NewClient(server.URL, server.Token, 30*time.Second)
@@ -2299,7 +2322,7 @@ func (s *Service) syncPlaylist(ctx context.Context, playlistID string) (int, int
 		}
 		if progress.Watching && item.Status != "watching" {
 			if err := s.playlistRepo.UpdateItemStatus(ctx, item.ID, "watching"); err != nil {
-				return watched, 0, fmt.Errorf("update watching item %s: %w", item.ID, err)
+				return nil, fmt.Errorf("update watching item %s: %w", item.ID, err)
 			}
 			continue
 		}
@@ -2309,28 +2332,42 @@ func (s *Service) syncPlaylist(ctx context.Context, playlistID string) (int, int
 		}
 
 		if err := s.completePlaylistQueueItem(ctx, p, item); err != nil {
-			return watched, 0, fmt.Errorf("complete playlist queue item %s: %w", item.ID, err)
+			return nil, fmt.Errorf("complete playlist queue item %s: %w", item.ID, err)
 		}
 		watched++
 	}
 
-	queued, err := s.fillPlaylist(ctx, playlistID)
-	if err != nil {
-		var shortfall *QueueShortfallError
-		if !errors.As(err, &shortfall) {
-			return watched, 0, fmt.Errorf("refill queue: %w", err)
-		}
+	result := &SyncPlaylistResult{Status: "synced", Watched: watched, CompletionsRecorded: watched, TargetCount: p.QueueTargetCount, TopUpStatus: "succeeded", PublicationStatus: "pending"}
+	queued, fillErr := s.fillPlaylist(ctx, playlistID)
+	result.AddedCount = queued
+	if fillErr != nil {
+		result.TopUpStatus = "failed"
+		result.TopUpError = fillErr.Error()
 	}
+	active, countErr := s.playlistRepo.CountPendingQueueItems(ctx, playlistID)
+	if countErr != nil {
+		return result, fmt.Errorf("count remaining queue: %w", countErr)
+	}
+	result.ActiveCount = active
+	result.Shortfall = max(p.QueueTargetCount-active, 0)
 	// Plex is only a projection of this queue. Apply every sync, even when no item
 	// changed, so a prior Plex failure is retried and removed episodes cannot linger.
 	if err := s.publishPlaylistProjection(ctx, playlistID); err != nil {
-		return watched, queued, fmt.Errorf("publish queue projection: %w", err)
+		result.PublicationStatus = "pending_retry"
+		if fillErr != nil {
+			return result, &PlaylistSyncError{Result: result, Err: errors.Join(fmt.Errorf("refill queue: %w", fillErr), fmt.Errorf("publish queue projection: %w", err))}
+		}
+		return result, &PlaylistSyncError{Result: result, Err: fmt.Errorf("publish queue projection: %w", err)}
 	}
+	result.PublicationStatus = "succeeded"
 
-	if progressErr != nil {
-		return watched, queued, fmt.Errorf("playback lookup incomplete: %w", progressErr)
+	if fillErr != nil {
+		return result, &PlaylistSyncError{Result: result, Err: fmt.Errorf("refill queue: %w", fillErr)}
 	}
-	return watched, queued, nil
+	if progressErr != nil {
+		return result, &PlaylistSyncError{Result: result, Err: fmt.Errorf("playback lookup incomplete: %w", progressErr)}
+	}
+	return result, nil
 }
 
 func newlyViewedAfter(progress media.EpisodeProgress, queuedAt time.Time) bool {
@@ -2348,7 +2385,7 @@ func (s *Service) SyncEnabledPlaylists(ctx context.Context) error {
 		if !playlist.Enabled {
 			continue
 		}
-		if _, _, err := s.SyncPlaylist(ctx, playlist.ID); err != nil {
+		if _, err := s.SyncPlaylist(ctx, playlist.ID); err != nil {
 			slog.Warn("sync playlist failed", "playlist_id", playlist.ID, "error", err)
 		}
 	}
