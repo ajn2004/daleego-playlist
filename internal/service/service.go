@@ -1481,6 +1481,7 @@ func (s *Service) planPlaylist(ctx context.Context, playlist *repository.Playlis
 	}
 	result := append([]repository.PlaylistQueueItem(nil), existing...)
 	nextPosition := nextQueuePosition(existing)
+	previousSeriesID := lastActiveQueueSeriesID(existing)
 	consumed := 0
 	added := 0
 	for added < need {
@@ -1499,9 +1500,11 @@ func (s *Service) planPlaylist(ctx context.Context, playlist *repository.Playlis
 		}
 		global := playlist.CycleCursor + consumed
 		slot := slots[global%len(slots)]
-		selected, ok := selectFillCandidate(candidates, slot.SlotType, global, len(members))
+		selected, ok := selectFillCandidateWithoutAdjacentSeries(candidates, slot.SlotType, global, len(members), previousSeriesID)
 		consumed++
 		if !ok {
+			// There is no legal next entry. Stop rather than retrying the same
+			// series forever or violating the adjacency invariant.
 			break
 		}
 		score := selected.rating
@@ -1513,8 +1516,35 @@ func (s *Service) planPlaylist(ctx context.Context, playlist *repository.Playlis
 		nextPosition++
 		added++
 		queued[selected.episodeID] = true
+		previousSeriesID = selected.seriesID
 	}
 	return result, playlist.CycleCursor + consumed, nil
+}
+
+func lastActiveQueueSeriesID(items []repository.PlaylistQueueItem) string {
+	for i := len(items) - 1; i >= 0; i-- {
+		if items[i].Status == "pending" || items[i].Status == "pushed" || items[i].Status == "watching" {
+			return items[i].SeriesID
+		}
+	}
+	return ""
+}
+
+func candidatesWithoutSeries(candidates []fillCandidate, seriesID string) []fillCandidate {
+	if seriesID == "" {
+		return candidates
+	}
+	filtered := make([]fillCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.seriesID != seriesID {
+			filtered = append(filtered, candidate)
+		}
+	}
+	return filtered
+}
+
+func selectFillCandidateWithoutAdjacentSeries(candidates []fillCandidate, slotType string, position, seriesCount int, previousSeriesID string) (fillCandidate, bool) {
+	return selectFillCandidate(candidatesWithoutSeries(candidates, previousSeriesID), slotType, position, seriesCount)
 }
 
 func nextQueuePosition(items []repository.PlaylistQueueItem) int {

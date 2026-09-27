@@ -205,6 +205,67 @@ func TestSelectFillCandidateRatedSlotsRequireRating(t *testing.T) {
 	}
 }
 
+func TestCandidatesWithoutSeriesEnforcesAdjacentShowIdentity(t *testing.T) {
+	candidates := []fillCandidate{
+		{seriesID: "show-a", episodeID: "a-1"},
+		{seriesID: "show-a", episodeID: "a-2"},
+		{seriesID: "show-b", episodeID: "b-1"},
+	}
+
+	got := candidatesWithoutSeries(candidates, "show-a")
+	if len(got) != 1 || got[0].seriesID != "show-b" {
+		t.Fatalf("candidates after show-a = %#v, want only show-b", got)
+	}
+}
+
+func TestLastActiveQueueSeriesIDUsesQueueBoundary(t *testing.T) {
+	items := []repository.PlaylistQueueItem{
+		{SeriesID: "show-a", Status: "pushed"},
+		{SeriesID: "show-b", Status: "skipped"},
+		{SeriesID: "show-c", Status: "watching"},
+	}
+	if got := lastActiveQueueSeriesID(items); got != "show-c" {
+		t.Fatalf("last active series = %q, want show-c", got)
+	}
+}
+
+func TestCandidatesWithoutSeriesAllowsShowAfterInterveningShow(t *testing.T) {
+	candidates := []fillCandidate{{seriesID: "show-a", episodeID: "a-2"}}
+	if got := candidatesWithoutSeries(candidates, "show-b"); len(got) != 1 || got[0].seriesID != "show-a" {
+		t.Fatalf("show-a should be eligible after show-b, got %#v", got)
+	}
+}
+
+func TestSelectFillCandidateWithoutAdjacentSeriesBuildsAValidSequence(t *testing.T) {
+	candidates := []fillCandidate{
+		{seriesID: "show-a", episodeID: "a-1"},
+		{seriesID: "show-b", episodeID: "b-1"},
+	}
+	previous := ""
+	var selected []string
+	for i := 0; i < 3; i++ {
+		candidate, ok := selectFillCandidateWithoutAdjacentSeries(candidates, "any", i, len(candidates), previous)
+		if !ok {
+			t.Fatalf("selection %d unexpectedly exhausted", i)
+		}
+		selected = append(selected, candidate.seriesID)
+		if candidate.seriesID == previous {
+			t.Fatalf("adjacent series repeated in %v", selected)
+		}
+		previous = candidate.seriesID
+	}
+	if selected[0] != "show-a" || selected[1] != "show-b" || selected[2] != "show-a" {
+		t.Fatalf("selection = %v, want show-a, show-b, show-a", selected)
+	}
+}
+
+func TestSelectFillCandidateWithoutAdjacentSeriesStopsWhenOnlyShowIsAvailable(t *testing.T) {
+	candidates := []fillCandidate{{seriesID: "show-a", episodeID: "a-1"}}
+	if _, ok := selectFillCandidateWithoutAdjacentSeries(candidates, "any", 1, 1, "show-a"); ok {
+		t.Fatal("expected no legal candidate when only the previous show is available")
+	}
+}
+
 func TestFirstUnqueuedEpisodeAtCursorLooksAhead(t *testing.T) {
 	position := 2
 	episodes := []repository.Episode{
